@@ -1,0 +1,6 @@
+.git
+build
+dist
+logs
+README.md
+*.md

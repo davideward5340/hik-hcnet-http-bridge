@@ -1,0 +1,13 @@
+.vs/
+**/bin/
+**/obj/
+**/logs/
+build/
+build-check/
+dist/
+runtime/
+state/
+TestResults/
+*.user
+*.suo
+*.log

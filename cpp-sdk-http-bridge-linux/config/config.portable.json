@@ -1,0 +1,37 @@
+{
+  "sdktype": "hcnetsdk",
+  "server": {
+    "bind": "127.0.0.1",
+    "port": 28080,
+    "maxSessions": 8
+  },
+  "sdk": {
+    "directory": "../sdk",
+    "readVideoCodecFromDevice": true,
+    "forceKeyFrameOnRealPlay": true,
+    "realPlayKeyFrameIntervalFrames": 25,
+    "connectProbeTimeoutMs": 1500
+  },
+  "ffmpeg": {
+    "path": "../runtime/ffmpeg/ffmpeg",
+    "logLevel": "info"
+  },
+  "logging": {
+    "directory": "../logs",
+    "retentionDays": 30
+  },
+  "media": {
+    "queueBytes": 67108864,
+    "queueBackpressureMs": 500,
+    "maxPlaybackSeconds": 86400,
+    "enableAudio": false,
+    "codecCacheSeconds": 900,
+    "codecCacheFile": "../state/video-codec-cache.tsv"
+  },
+  "timeouts": {
+    "sdkStartMs": 10000,
+    "firstMediaMs": 15000,
+    "noSdkDataMs": 10000,
+    "playbackKeepAliveMs": 1500
+  }
+}

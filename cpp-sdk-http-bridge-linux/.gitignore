@@ -1,0 +1,28 @@
+# IDE 与本地开发缓存
+.vscode/
+.idea/
+.cache/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+
+# 编译和发布产物
+build/
+build-portable/
+build-wsl/
+dist/
+runtime/
+tools/
+*.o
+*.a
+*.so
+*.AppImage
+*.tar.gz
+
+# 运行时日志与缓存（可能包含内部设备地址和运行诊断）
+logs/
+state/
+*.log
+
+# 第三方 HCNetSDK 二进制及头文件需按供应商授权单独获取，不随源码仓库提交
+vendor/

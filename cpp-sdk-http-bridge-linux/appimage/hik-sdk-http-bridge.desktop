@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Hik SDK HTTP Bridge
+Comment=HCNetSDK local HTTP fMP4 bridge for NVR live and playback video
+Exec=hik-sdk-http-bridge
+Icon=hik-sdk-http-bridge
+Terminal=true
+Categories=Network;Utility;
+StartupNotify=false

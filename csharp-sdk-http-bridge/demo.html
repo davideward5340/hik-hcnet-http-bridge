@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>HCNetSDK HTTP Bridge Demo</title>
+  <style>
+    body{font:14px/1.5 system-ui,"Microsoft YaHei",sans-serif;max-width:980px;margin:24px auto;padding:0 16px;background:#111827;color:#e5e7eb}
+    .form{display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:12px;margin-bottom:12px} label{display:flex;flex-direction:column;gap:5px}
+    input,select,button{box-sizing:border-box;padding:9px;border:1px solid #4b5563;border-radius:6px;background:#1f2937;color:#fff}button{cursor:pointer;background:#2563eb;border:0}
+    video{width:100%;min-height:420px;background:#000;border-radius:8px;margin-top:12px}.actions{display:flex;gap:10px;align-items:end}.status{color:#93c5fd}
+    @media(max-width:700px){.form{grid-template-columns:1fr 1fr}}
+  </style>
+</head>
+<body>
+  <h1>HCNetSDK HTTP Bridge Demo</h1>
+  <div class="form">
+    <label>NVR IP<input id="ip" value="10.194.48.204"></label>
+    <label>用户名<input id="username" value="admin"></label>
+    <label>密码<input id="password" type="password"></label>
+    <label>SDK 通道号<input id="camera" type="number" min="1" value="1"></label>
+    <label>开始时间<input id="start" type="datetime-local" step="1" value="2026-07-14T10:00:00"></label>
+    <label>结束时间<input id="end" type="datetime-local" step="1" value="2026-07-14T11:00:00"></label>
+    <label>码流<select id="stream"><option value="main">主码流</option><option value="sub">子码流</option></select></label>
+    <label>回放速度<select id="speed"><option>16</option><option>8</option><option>4</option><option>2</option><option selected>1</option><option>0.5</option><option>0.25</option><option>0.125</option><option>0.0625</option></select></label>
+  </div>
+  <div class="actions">
+    <button id="real">实时播放</button><button id="playback">视频回放</button><span id="status" class="status">本地服务：http://127.0.0.1:28080</span>
+  </div>
+  <video id="video" autoplay playsinline></video>
+  <script>
+    const $=id=>document.getElementById(id), video=$('video'), status=$('status');
+    let aborter, mediaSource, sourceBuffer, objectUrl, parserBuffer=new Uint8Array(), initParts=[], fragmentParts=null, pending=[];
+    const join=parts=>{let n=0,o=0;parts.forEach(x=>n+=x.length);const r=new Uint8Array(n);parts.forEach(x=>{r.set(x,o);o+=x.length;});return r;};
+    const u32=(v,o)=>v[o]*0x1000000+v[o+1]*0x10000+v[o+2]*0x100+v[o+3];
+    const boxType=(v,o)=>String.fromCharCode(v[o],v[o+1],v[o+2],v[o+3]);
+    function common(option){
+      const q=new URLSearchParams({option,ip:$('ip').value,port:'8000',username:$('username').value,password:$('password').value,camera:$('camera').value,stream:$('stream').value,speed:option==='realplay'?'1':$('speed').value,sid:Date.now().toString()});
+      if(option==='playback'){q.set('start',Math.floor(new Date($('start').value).getTime()/1000));q.set('end',Math.floor(new Date($('end').value).getTime()/1000));}
+      return 'http://127.0.0.1:28080/video?'+q;
+    }
+    function stop(){try{aborter&&aborter.abort();}catch(e){}try{mediaSource&&mediaSource.readyState==='open'&&mediaSource.endOfStream();}catch(e){}try{video.pause();video.removeAttribute('src');video.load();}catch(e){}try{objectUrl&&URL.revokeObjectURL(objectUrl);}catch(e){}aborter=mediaSource=sourceBuffer=objectUrl=null;pending=[];parserBuffer=new Uint8Array();initParts=[];fragmentParts=null;}
+    function drain(){if(!sourceBuffer||sourceBuffer.updating||!pending.length)return;try{sourceBuffer.appendBuffer(pending.shift());}catch(e){status.textContent='MSE 追加分片失败：'+e.message;}}
+    function accept(chunk){parserBuffer=join([parserBuffer,chunk]);let at=0;while(parserBuffer.length-at>=8){let size=u32(parserBuffer,at),head=8;if(size===1){if(parserBuffer.length-at<16)break;if(u32(parserBuffer,at+8)!==0)throw Error('MP4 分片过大');size=u32(parserBuffer,at+12);head=16;}if(size<head)throw Error('无效 MP4 box');if(parserBuffer.length-at<size)break;const box=parserBuffer.slice(at,at+size),type=boxType(parserBuffer,at+4);at+=size;if(type==='ftyp'||type==='moov'){initParts.push(box);if(type==='moov'){pending.push(join(initParts));initParts=[];}}else if(type==='styp'||type==='moof'){fragmentParts=[box];}else if(type==='mdat'&&fragmentParts){fragmentParts.push(box);pending.push(join(fragmentParts));fragmentParts=null;}else if(fragmentParts)fragmentParts.push(box);}if(at)parserBuffer=parserBuffer.slice(at);drain();}
+    async function start(option){
+      stop();
+      if(!window.MediaSource){status.textContent='当前浏览器不支持 MSE。';return;}
+      status.textContent='正在建立 '+option+' MSE 会话…'; aborter=new AbortController();mediaSource=new MediaSource();objectUrl=URL.createObjectURL(mediaSource);video.src=objectUrl;
+      await new Promise(resolve=>mediaSource.addEventListener('sourceopen',resolve,{once:true}));
+      try{
+        const response=await fetch(common(option),{cache:'no-store',signal:aborter.signal});if(!response.ok)throw Error('Bridge HTTP '+response.status);
+        const codecs=response.headers.get('X-Hik-Bridge-Mse-Codecs')||'avc1.640029,mp4a.40.2',mime='video/mp4; codecs="'+codecs+'"';
+        if(!MediaSource.isTypeSupported(mime))throw Error('浏览器不支持编码：'+codecs);
+        sourceBuffer=mediaSource.addSourceBuffer(mime);sourceBuffer.addEventListener('updateend',drain);
+        const reader=response.body.getReader();for(;;){const item=await reader.read();if(item.done)break;accept(item.value);}
+        if(mediaSource.readyState==='open'&&!sourceBuffer.updating)mediaSource.endOfStream();
+      }catch(e){if(e.name!=='AbortError')status.textContent='播放启动失败：'+e.message;}
+    }
+    $('real').onclick=()=>start('realplay'); $('playback').onclick=()=>start('playback');
+    video.onplaying=()=>status.textContent='正在播放（MSE / H.264）'; video.onerror=()=>status.textContent='视频启动失败，请检查本地服务、NVR 参数和浏览器控制台。';
+    window.addEventListener('pagehide',stop); window.addEventListener('beforeunload',stop);
+  </script>
+</body>
+</html>
