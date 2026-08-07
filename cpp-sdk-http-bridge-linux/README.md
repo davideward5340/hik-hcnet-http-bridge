@@ -67,13 +67,13 @@ dist/hik-sdk-http-bridge-linux-x86_64-1.0.0.tar.gz.sha256
 实时（`camera` 为 HCNetSDK 真实通道号，不做固定 `+32`）：
 
 ```text
-GET /video?option=realplay&ip=10.194.48.204&port=8000&username=admin&password=PASSWORD&camera=33&stream=main&speed=1&sid=live-001
+GET /video?option=realplay&ip=192.0.2.10&port=8000&username=admin&password=PASSWORD&camera=33&stream=main&speed=1&sid=live-001
 ```
 
 回放：
 
 ```text
-GET /video?option=playback&ip=10.194.48.204&port=8000&username=admin&password=PASSWORD&camera=33&stream=main&speed=1&sid=vod-001&start=1783998000&end=1783998300
+GET /video?option=playback&ip=192.0.2.10&port=8000&username=admin&password=PASSWORD&camera=33&stream=main&speed=1&sid=vod-001&start=1783998000&end=1783998300
 ```
 
 `start`、`end` 是 Unix 秒。响应包含 `X-Hik-Bridge-Mse-Codecs`、`X-Hik-Bridge-Playback-Start` 和 `X-Hik-Bridge-Playback-End`，供 MSE 前端选择 `SourceBuffer` 并恢复回放。fMP4 不是随机访问文件，回放定位时前端须主动中止旧 fetch，并用新的 `start` 重新请求 `/video`。
@@ -85,7 +85,7 @@ GET /video?option=playback&ip=10.194.48.204&port=8000&username=admin&password=PA
 模拟通道 1 示例：
 
 ```text
-GET /video?option=realplay&ip=10.194.48.204&port=8000&username=admin&password=PASSWORD&camera=1&channelType=analog&stream=main&speed=1&sid=analog-live-001
+GET /video?option=realplay&ip=192.0.2.10&port=8000&username=admin&password=PASSWORD&camera=1&channelType=analog&stream=main&speed=1&sid=analog-live-001
 ```
 
 支持速度：`16|8|4|2|1|0.5|0.25|0.125|0.0625`。非 1 倍速不输出音频，避免音视频时间轴失配。

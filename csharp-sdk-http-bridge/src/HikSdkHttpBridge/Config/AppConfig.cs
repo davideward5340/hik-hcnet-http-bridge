@@ -46,7 +46,8 @@ namespace HikSdkHttpBridge.Config
         private void Validate()
         {
             if (!string.Equals(SdkType, "hcnetsdk", StringComparison.OrdinalIgnoreCase)) throw new ConfigException("INVALID_CONFIG", "sdktype must be hcnetsdk");
-            if (Server == null || string.IsNullOrWhiteSpace(Server.Bind) || Server.Bind == "0.0.0.0" || Server.Port < 1 || Server.Port > 65535 || Server.Threads < 1 || Server.MaxSessions < 1) throw new ConfigException("INVALID_CONFIG", "invalid server settings");
+            // 桥接服务会接收 NVR 凭据，禁止绑定到局域网、公网或 IPv6 回环地址。
+            if (Server == null || !string.Equals(Server.Bind, "127.0.0.1", StringComparison.Ordinal) || Server.Port < 1 || Server.Port > 65535 || Server.Threads < 1 || Server.MaxSessions < 1) throw new ConfigException("INVALID_CONFIG", "server.bind must be 127.0.0.1 and server settings must be valid");
             if (Sdk == null || string.IsNullOrWhiteSpace(Sdk.HcnetDirectory) || Sdk.RealPlayKeyFrameIntervalFrames < 0 || Sdk.RealPlayKeyFrameIntervalFrames > ushort.MaxValue || Sdk.ConnectProbeTimeoutMs < 100 || Sdk.ConnectProbeTimeoutMs > 10000) throw new ConfigException("INVALID_CONFIG", "invalid sdk settings");
             if (Ffmpeg == null || string.IsNullOrWhiteSpace(Ffmpeg.Path)) throw new ConfigException("INVALID_CONFIG", "ffmpeg.path is required");
             var hardwareAcceleration = (Ffmpeg.HardwareAcceleration ?? "auto").Trim().ToLowerInvariant();

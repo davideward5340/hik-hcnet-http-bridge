@@ -1,0 +1,10 @@
+/build/
+/dist/
+/logs/
+*.log
+*.ts
+*.mp4
+config.local.json
+.vs/
+git access token.txt
+demo.html

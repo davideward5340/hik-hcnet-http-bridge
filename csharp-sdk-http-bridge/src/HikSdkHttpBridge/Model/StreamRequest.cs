@@ -60,7 +60,7 @@ namespace HikSdkHttpBridge.Model
             if (!double.TryParse(query["speed"] ?? "1", NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var speed) || Array.IndexOf(Speeds, speed) < 0) throw Bad("unsupported speed");
             request.Speed = speed;
             request.Sid = Required(query, "sid");
-            if (request.Sid.Length > 128) throw Bad("sid is too long");
+            if (request.Sid.Length > 128 || !IsSafeSessionId(request.Sid)) throw Bad("sid must contain only letters, digits, hyphen, or underscore");
 
             if (request.Option == StreamOption.RealPlay)
             {
@@ -82,6 +82,17 @@ namespace HikSdkHttpBridge.Model
             var value = query[name];
             if (string.IsNullOrWhiteSpace(value)) throw Bad(name + " is required");
             return value;
+        }
+
+        private static bool IsSafeSessionId(string value)
+        {
+            foreach (var character in value)
+            {
+                if ((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+                    (character >= '0' && character <= '9') || character == '-' || character == '_') continue;
+                return false;
+            }
+            return true;
         }
 
         private static BridgeException Bad(string message) { return new BridgeException(400, "INVALID_PARAMETER", message); }

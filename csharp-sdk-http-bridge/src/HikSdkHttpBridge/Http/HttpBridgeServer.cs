@@ -56,6 +56,13 @@ namespace HikSdkHttpBridge.Http
 
         private async Task Handle(HttpListenerContext context)
         {
+            if (!IsLocalIpv4Request(context.Request))
+            {
+                Log.Warn("已拒绝非本机 IPv4 客户端的 HTTP 请求。");
+                context.Response.StatusCode = 403;
+                context.Response.Close();
+                return;
+            }
             var requestId = context.Request.QueryString["sid"] ?? Guid.NewGuid().ToString("N");
             try
             {
@@ -119,6 +126,12 @@ namespace HikSdkHttpBridge.Http
                 try { if (context.Response.OutputStream.CanWrite) await WriteJson(context.Response, 500, new { code = "INTERNAL_ERROR", message = "internal server error", requestId }).ConfigureAwait(false); } catch { }
             }
             finally { try { context.Response.Close(); } catch { } }
+        }
+
+        private static bool IsLocalIpv4Request(HttpListenerRequest request)
+        {
+            var remoteEndPoint = request.RemoteEndPoint;
+            return remoteEndPoint != null && IPAddress.Loopback.Equals(remoteEndPoint.Address);
         }
 
         private async Task HandleVideo(HttpListenerContext context, StreamRequest request, bool isRangeRetry)

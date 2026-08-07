@@ -302,7 +302,7 @@ Config load_config(const fs::path& config_path) {
     if (const char* sdk_override = std::getenv("HIK_BRIDGE_SDK_DIR")) config.sdk_directory = sdk_override;
     if (const char* ffmpeg_override = std::getenv("HIK_BRIDGE_FFMPEG_PATH")) config.ffmpeg_path = ffmpeg_override;
     if (const char* log_override = std::getenv("HIK_BRIDGE_LOG_DIR")) config.log_directory = log_override;
-    if (sdk_type != "hcnetsdk" || config.bind.empty() || config.bind == "0.0.0.0" || config.port < 1 || config.port > 65535 || config.max_sessions < 1 || config.queue_bytes < 65536 || config.queue_backpressure_ms < 0 || config.queue_backpressure_ms > 5000 || config.codec_cache_seconds < 0 || config.codec_cache_seconds > 86400 || config.realplay_keyframe_interval_frames < 0 || config.realplay_keyframe_interval_frames > 65535 || config.connect_probe_timeout_ms < 100 || config.connect_probe_timeout_ms > 10000 || config.codec_cache_file.empty() || config.log_retention_days < 1 ||
+    if (sdk_type != "hcnetsdk" || config.bind != "127.0.0.1" || config.port < 1 || config.port > 65535 || config.max_sessions < 1 || config.queue_bytes < 65536 || config.queue_backpressure_ms < 0 || config.queue_backpressure_ms > 5000 || config.codec_cache_seconds < 0 || config.codec_cache_seconds > 86400 || config.realplay_keyframe_interval_frames < 0 || config.realplay_keyframe_interval_frames > 65535 || config.connect_probe_timeout_ms < 100 || config.connect_probe_timeout_ms > 10000 || config.codec_cache_file.empty() || config.log_retention_days < 1 ||
         config.max_playback_seconds < 1 || config.sdk_start_ms < 1 || config.first_media_ms < 1 || config.no_sdk_data_ms < 1 ||
         config.playback_keep_alive_ms < 1000 || config.playback_keep_alive_ms > 5000 ||
         config.log_directory.empty() || config.output_video_codec != "h264" || config.video_encoder.empty() || config.video_preset.empty()) {
@@ -344,6 +344,13 @@ std::string required(const Query& query, const std::string& name) {
     const auto item = query.find(name);
     if (item == query.end() || item->second.empty()) throw BridgeError(400, "INVALID_PARAMETER", name + " is required");
     return item->second;
+}
+
+bool is_safe_session_id(const std::string& value) {
+    return !value.empty() && std::all_of(value.begin(), value.end(), [](unsigned char character) {
+        return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+            (character >= '0' && character <= '9') || character == '-' || character == '_';
+    });
 }
 
 long long parse_long(const std::string& value, const std::string& name) {
@@ -406,7 +413,7 @@ StreamRequest parse_stream_request(const Query& query, const Config& config) {
     try { request.speed = std::stod(speed_text); } catch (...) { throw BridgeError(400, "INVALID_PARAMETER", "unsupported speed"); }
     const std::set<double> valid_speeds{16, 8, 4, 2, 1, .5, .25, .125, .0625};
     if (!valid_speeds.count(request.speed)) throw BridgeError(400, "INVALID_PARAMETER", "unsupported speed");
-    if (request.port < 1 || request.port > 65535 || request.camera < 0 || (request.channel_type != ChannelType::DigitalIndex && request.camera < 1) || request.ip.size() > 128 || request.username.size() > 63 || request.password.size() > 63 || request.sid.size() > 128) {
+    if (request.port < 1 || request.port > 65535 || request.camera < 0 || (request.channel_type != ChannelType::DigitalIndex && request.camera < 1) || request.ip.size() > 128 || request.username.size() > 63 || request.password.size() > 63 || request.sid.size() > 128 || !is_safe_session_id(request.sid)) {
         throw BridgeError(400, "INVALID_PARAMETER", "NVR parameter is out of range");
     }
     if (request.option == Option::Playback) {
@@ -1631,6 +1638,12 @@ int create_listener(const Config& config) {
     return listener;
 }
 
+bool is_local_ipv4_client(const sockaddr_storage& peer) {
+    if (peer.ss_family != AF_INET) return false;
+    const auto* address = reinterpret_cast<const sockaddr_in*>(&peer);
+    return ntohl(address->sin_addr.s_addr) == 0x7f000001U;
+}
+
 void run_server(const Config& config) {
     HcNetRuntime sdk(config);
     SessionRegistry registry(config.max_sessions);
@@ -1643,6 +1656,7 @@ void run_server(const Config& config) {
         socklen_t length = sizeof(peer);
         const int client = ::accept(listener, reinterpret_cast<sockaddr*>(&peer), &length);
         if (client < 0) { if (errno == EINTR) continue; log_line("WARN", "接受 HTTP 连接失败：系统错误=" + std::to_string(errno) + "。"); continue; }
+        if (!is_local_ipv4_client(peer)) { log_line("WARN", "已拒绝非本机 IPv4 客户端的 HTTP 请求。"); ::close(client); continue; }
         std::thread([client, &config, &registry, &statuses, &codec_cache] { handle_connection(client, config, registry, statuses, codec_cache); ::close(client); }).detach();
     }
     ::close(listener);
