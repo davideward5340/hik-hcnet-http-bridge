@@ -14,7 +14,9 @@
   },
   "ffmpeg": {
     "path": "../runtime/ffmpeg/ffmpeg",
-    "logLevel": "info"
+    "logLevel": "info",
+    "hardwareAcceleration": "auto",
+    "hardwareProbeTimeoutMs": 3000
   },
   "logging": {
     "directory": "../logs",

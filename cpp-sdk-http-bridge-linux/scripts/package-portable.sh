@@ -3,6 +3,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$ROOT/.." && pwd)
 VERSION=${VERSION:-1.0.0}
 PACKAGE_NAME="hik-sdk-http-bridge-linux-x86_64-$VERSION"
 BRIDGE_BINARY=${BRIDGE_BINARY:-"$ROOT/build-portable/hik-sdk-http-bridge"}
@@ -54,6 +55,8 @@ cp -a "$ROOT/vendor/hcnetsdk/sdk" "$PACKAGE_DIR/sdk"
 install -m 0644 "$ROOT/config/config.portable.json" "$PACKAGE_DIR/config/config.json"
 install -m 0755 "$ROOT/scripts/start-portable.sh" "$PACKAGE_DIR/start.sh"
 cp -a "$ROOT/vendor/licenses/." "$PACKAGE_DIR/licenses/"
+install -m 0644 "$REPO_ROOT/LICENSE" "$PACKAGE_DIR/licenses/PROJECT-APACHE-2.0.txt"
+install -m 0644 "$REPO_ROOT/NOTICE" "$PACKAGE_DIR/NOTICE"
 install -m 0644 "$ROOT/runtime/ffmpeg/README.md" "$PACKAGE_DIR/licenses/FFMPEG-BUILD-AND-LICENSES.md"
 install -m 0644 "$ROOT/runtime/ffmpeg/LICENSE.LGPL-2.1" "$PACKAGE_DIR/licenses/FFMPEG-LGPL-2.1.txt"
 "$FFMPEG_BINARY" -buildconf > "$PACKAGE_DIR/licenses/FFMPEG-BUILDCONF.txt"

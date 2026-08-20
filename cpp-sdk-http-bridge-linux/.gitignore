@@ -10,6 +10,11 @@ CMakeCache.txt
 build/
 build-portable/
 build-wsl/
+build-arm64/
+build-arm64-glibc223/
+build-x86_64-glibc223/
+build-x86_64-ffmpeg/
+build-win32/
 dist/
 runtime/
 tools/

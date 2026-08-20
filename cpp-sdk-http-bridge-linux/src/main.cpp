@@ -1,5 +1,16 @@
-#include "HCNetSDK.h"
-
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <io.h>
+#include <signal.h>
+#else
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -9,11 +20,15 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
+
+#include "HCNetSDK.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <clocale>
 #include <condition_variable>
 #include <cmath>
 #include <cstdint>
@@ -43,7 +58,122 @@
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
+#ifndef HIK_BRIDGE_ARCH
+#if defined(_WIN32) && defined(_M_IX86)
+#define HIK_BRIDGE_ARCH "windows-x86"
+#elif defined(_WIN32) && defined(_M_X64)
+#define HIK_BRIDGE_ARCH "windows-x64"
+#elif defined(__aarch64__)
+#define HIK_BRIDGE_ARCH "linux-arm64"
+#elif defined(__x86_64__)
+#define HIK_BRIDGE_ARCH "linux-amd64"
+#else
+#define HIK_BRIDGE_ARCH "linux-unknown"
+#endif
+#endif
+
 namespace {
+
+#if defined(_WIN32)
+using socket_handle = SOCKET;
+using socket_length = int;
+using io_size = SSIZE_T;
+using platform_pollfd = WSAPOLLFD;
+constexpr socket_handle invalid_socket = INVALID_SOCKET;
+constexpr int platform_pollin = POLLRDNORM;
+constexpr int platform_pollout = POLLWRNORM;
+int socket_last_error() { return WSAGetLastError(); }
+void close_socket(socket_handle value) { if (value != invalid_socket) ::closesocket(value); }
+int poll_socket(platform_pollfd* value, ULONG count, int timeout_ms) { return ::WSAPoll(value, count, timeout_ms); }
+bool socket_would_block(int error) { return error == WSAEWOULDBLOCK || error == WSAEINPROGRESS; }
+std::string address_error_text(int error) { return std::to_string(error); }
+void local_time_safe(std::time_t value, std::tm& output) { localtime_s(&output, &value); }
+void utc_time_safe(std::time_t value, std::tm& output) { gmtime_s(&output, &value); }
+
+class NetworkRuntime {
+public:
+    NetworkRuntime() {
+        WSADATA data{};
+        if (WSAStartup(MAKEWORD(2, 2), &data) != 0) throw std::runtime_error("WSAStartup failed");
+        initialized_ = true;
+    }
+    ~NetworkRuntime() { if (initialized_) WSACleanup(); }
+private:
+    bool initialized_{false};
+};
+
+// Console code pages belong to the shared console, not just this process. In validate-config mode
+// the bridge is launched from a CP936 batch file, so restore the caller's code pages on every exit.
+class ConsoleCodePageScope {
+public:
+    ConsoleCodePageScope() : input_(GetConsoleCP()), output_(GetConsoleOutputCP()) {}
+    ~ConsoleCodePageScope() {
+        if (input_ != 0) SetConsoleCP(input_);
+        if (output_ != 0) SetConsoleOutputCP(output_);
+    }
+private:
+    UINT input_;
+    UINT output_;
+};
+
+std::wstring utf8_to_wide(const std::string& value) {
+    if (value.empty()) return {};
+    const int size = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0);
+    if (size <= 0) return std::wstring(value.begin(), value.end());
+    std::wstring result(static_cast<size_t>(size), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), result.data(), size);
+    return result;
+}
+
+std::wstring quote_windows_argument(const std::wstring& value) {
+    if (value.find_first_of(L" \t\"") == std::wstring::npos) return value;
+    std::wstring result{L"\""};
+    size_t slashes = 0;
+    for (const wchar_t ch : value) {
+        if (ch == L'\\') { ++slashes; continue; }
+        if (ch == L'\"') result.append(slashes * 2 + 1, L'\\');
+        else result.append(slashes, L'\\');
+        slashes = 0;
+        result.push_back(ch);
+    }
+    result.append(slashes * 2, L'\\');
+    result.push_back(L'\"');
+    return result;
+}
+
+void write_utf8_line(HANDLE console, FILE* redirected, const std::string& text) {
+    DWORD mode = 0;
+    if (console != INVALID_HANDLE_VALUE && console != nullptr && GetConsoleMode(console, &mode)) {
+        const auto wide = utf8_to_wide(text + "\n");
+        DWORD written = 0;
+        WriteConsoleW(console, wide.data(), static_cast<DWORD>(wide.size()), &written, nullptr);
+        return;
+    }
+    std::fwrite(text.data(), 1, text.size(), redirected);
+    std::fwrite("\n", 1, 1, redirected);
+    std::fflush(redirected);
+}
+void write_stderr_line(const std::string& text) { write_utf8_line(GetStdHandle(STD_ERROR_HANDLE), stderr, text); }
+void write_stdout_line(const std::string& text) { write_utf8_line(GetStdHandle(STD_OUTPUT_HANDLE), stdout, text); }
+#else
+using socket_handle = int;
+using socket_length = socklen_t;
+using io_size = ssize_t;
+using platform_pollfd = pollfd;
+constexpr socket_handle invalid_socket = -1;
+constexpr int platform_pollin = POLLIN;
+constexpr int platform_pollout = POLLOUT;
+int socket_last_error() { return errno; }
+void close_socket(socket_handle value) { if (value != invalid_socket) ::close(value); }
+int poll_socket(platform_pollfd* value, nfds_t count, int timeout_ms) { return ::poll(value, count, timeout_ms); }
+bool socket_would_block(int error) { return error == EINPROGRESS; }
+std::string address_error_text(int error) { return ::gai_strerror(error); }
+void local_time_safe(std::time_t value, std::tm& output) { localtime_r(&value, &output); }
+void utc_time_safe(std::time_t value, std::tm& output) { gmtime_r(&value, &output); }
+class NetworkRuntime {};
+void write_stderr_line(const std::string& text) { std::cerr << text << std::endl; }
+void write_stdout_line(const std::string& text) { std::cout << text << std::endl; }
+#endif
 
 std::atomic_bool g_running{true};
 
@@ -75,7 +205,7 @@ public:
 private:
     static std::tm local_time(std::time_t now) {
         std::tm value{};
-        localtime_r(&now, &value);
+        local_time_safe(now, value);
         return value;
     }
 
@@ -131,12 +261,12 @@ std::unique_ptr<DailyLogWriter> g_daily_logger;
 void log_line(const char* level, const std::string& text) {
     const auto now = std::time(nullptr);
     std::tm tm{};
-    localtime_r(&now, &tm);
-    const char* chinese_level = std::strcmp(level, "WARN") == 0 ? "警告" :
+    local_time_safe(now, tm);
+    const char* display_level = std::strcmp(level, "WARN") == 0 ? "警告" :
         (std::strcmp(level, "ERROR") == 0 ? "错误" : "信息");
     std::ostringstream line;
-    line << std::put_time(&tm, "%F %T") << " [" << chinese_level << "] " << text;
-    std::cerr << line.str() << std::endl;
+    line << std::put_time(&tm, "%F %T") << " [" << display_level << "] " << text;
+    write_stderr_line(line.str());
     if (g_daily_logger) g_daily_logger->write(line.str(), now);
 }
 
@@ -166,6 +296,9 @@ struct Config {
     int connect_probe_timeout_ms{1500};
     fs::path ffmpeg_path{"/usr/bin/ffmpeg"};
     std::string ffmpeg_log_level{"info"};
+    // Windows 下 auto 依次真实探测 NVENC、QSV、AMF；Linux 始终使用软件转码。
+    std::string hardware_acceleration{"auto"};
+    int hardware_probe_timeout_ms{3000};
     fs::path log_directory{"../logs"};
     int log_retention_days{30};
     size_t queue_bytes{64 * 1024 * 1024};
@@ -195,7 +328,7 @@ std::string trim(std::string value) {
 
 std::string read_file(const fs::path& path) {
     std::ifstream input(path);
-    if (!input) throw BridgeError(500, "CONFIG_NOT_FOUND", "configuration file not found: " + path.string());
+    if (!input) throw BridgeError(500, "CONFIG_NOT_FOUND", "未找到配置文件：" + path.string());
     std::ostringstream content;
     content << input.rdbuf();
     return content.str();
@@ -240,7 +373,7 @@ int json_int(const std::string& section, const std::string& name, int fallback) 
     const auto value = json_value(section, name);
     if (!value) return fallback;
     try { return std::stoi(*value); }
-    catch (...) { throw BridgeError(500, "INVALID_CONFIG", "invalid integer config value: " + name); }
+    catch (...) { throw BridgeError(500, "INVALID_CONFIG", "配置项不是有效整数：" + name); }
 }
 
 bool json_bool(const std::string& section, const std::string& name, bool fallback) {
@@ -248,7 +381,7 @@ bool json_bool(const std::string& section, const std::string& name, bool fallbac
     if (!value) return fallback;
     if (*value == "true") return true;
     if (*value == "false") return false;
-    throw BridgeError(500, "INVALID_CONFIG", "invalid boolean config value: " + name);
+    throw BridgeError(500, "INVALID_CONFIG", "配置项不是有效布尔值：" + name);
 }
 
 std::string json_string(const std::string& section, const std::string& name, const std::string& fallback) {
@@ -277,10 +410,14 @@ Config load_config(const fs::path& config_path) {
     config.connect_probe_timeout_ms = json_int(sdk, "connectProbeTimeoutMs", config.connect_probe_timeout_ms);
     config.ffmpeg_path = json_string(ffmpeg, "path", config.ffmpeg_path.string());
     config.ffmpeg_log_level = json_string(ffmpeg, "logLevel", config.ffmpeg_log_level);
+    config.hardware_acceleration = json_string(ffmpeg, "hardwareAcceleration", config.hardware_acceleration);
+    std::transform(config.hardware_acceleration.begin(), config.hardware_acceleration.end(), config.hardware_acceleration.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    config.hardware_probe_timeout_ms = json_int(ffmpeg, "hardwareProbeTimeoutMs", config.hardware_probe_timeout_ms);
     config.log_directory = json_string(logging, "directory", config.log_directory.string());
     config.log_retention_days = json_int(logging, "retentionDays", config.log_retention_days);
     const int queue_bytes = json_int(media, "queueBytes", static_cast<int>(config.queue_bytes));
-    if (queue_bytes < 0) throw BridgeError(500, "INVALID_CONFIG", "media.queueBytes must be positive");
+    if (queue_bytes < 0) throw BridgeError(500, "INVALID_CONFIG", "media.queueBytes 必须为正数");
     config.queue_bytes = static_cast<size_t>(queue_bytes);
     config.queue_backpressure_ms = json_int(media, "queueBackpressureMs", config.queue_backpressure_ms);
     config.max_playback_seconds = json_int(media, "maxPlaybackSeconds", config.max_playback_seconds);
@@ -305,8 +442,13 @@ Config load_config(const fs::path& config_path) {
     if (sdk_type != "hcnetsdk" || config.bind != "127.0.0.1" || config.port < 1 || config.port > 65535 || config.max_sessions < 1 || config.queue_bytes < 65536 || config.queue_backpressure_ms < 0 || config.queue_backpressure_ms > 5000 || config.codec_cache_seconds < 0 || config.codec_cache_seconds > 86400 || config.realplay_keyframe_interval_frames < 0 || config.realplay_keyframe_interval_frames > 65535 || config.connect_probe_timeout_ms < 100 || config.connect_probe_timeout_ms > 10000 || config.codec_cache_file.empty() || config.log_retention_days < 1 ||
         config.max_playback_seconds < 1 || config.sdk_start_ms < 1 || config.first_media_ms < 1 || config.no_sdk_data_ms < 1 ||
         config.playback_keep_alive_ms < 1000 || config.playback_keep_alive_ms > 5000 ||
-        config.log_directory.empty() || config.output_video_codec != "h264" || config.video_encoder.empty() || config.video_preset.empty()) {
-        throw BridgeError(500, "INVALID_CONFIG", "invalid bridge configuration");
+        config.log_directory.empty() || config.output_video_codec != "h264" || config.video_encoder.empty() || config.video_preset.empty() ||
+        config.hardware_probe_timeout_ms < 1000 || config.hardware_probe_timeout_ms > 30000 ||
+        (config.hardware_acceleration != "auto" && config.hardware_acceleration != "off" && config.hardware_acceleration != "none" &&
+         config.hardware_acceleration != "disabled" && config.hardware_acceleration != "software" && config.hardware_acceleration != "nvidia" &&
+         config.hardware_acceleration != "nvenc" && config.hardware_acceleration != "cuda" && config.hardware_acceleration != "qsv" &&
+         config.hardware_acceleration != "intel" && config.hardware_acceleration != "amf" && config.hardware_acceleration != "amd")) {
+        throw BridgeError(500, "INVALID_CONFIG", "桥接服务配置无效");
     }
     return config;
 }
@@ -342,7 +484,7 @@ Query parse_query(const std::string& text) {
 
 std::string required(const Query& query, const std::string& name) {
     const auto item = query.find(name);
-    if (item == query.end() || item->second.empty()) throw BridgeError(400, "INVALID_PARAMETER", name + " is required");
+    if (item == query.end() || item->second.empty()) throw BridgeError(400, "INVALID_PARAMETER", "缺少必填参数：" + name);
     return item->second;
 }
 
@@ -355,12 +497,12 @@ bool is_safe_session_id(const std::string& value) {
 
 long long parse_long(const std::string& value, const std::string& name) {
     try { size_t used = 0; const auto result = std::stoll(value, &used); if (used != value.size()) throw std::invalid_argument("tail"); return result; }
-    catch (...) { throw BridgeError(400, "INVALID_PARAMETER", name + " must be an integer"); }
+    catch (...) { throw BridgeError(400, "INVALID_PARAMETER", name + " 必须为整数"); }
 }
 
 int parse_int(const std::string& value, const std::string& name) {
     const auto result = parse_long(value, name);
-    if (result < INT32_MIN || result > INT32_MAX) throw BridgeError(400, "INVALID_PARAMETER", name + " is out of range");
+    if (result < INT32_MIN || result > INT32_MAX) throw BridgeError(400, "INVALID_PARAMETER", name + " 超出允许范围");
     return static_cast<int>(result);
 }
 
@@ -387,12 +529,32 @@ struct StreamRequest {
     std::string sid;
 };
 
+// Windows 的完整 FFmpeg 已验证可稳定封装 H.264 回放；Linux 的裁剪版静态 FFmpeg
+// 在 NVR 回放 PS 流直通时可能生成浏览器无法解码的 fMP4。Linux 仅对实时预览保留零转码。
+bool h264_copy_allowed(const StreamRequest& request) {
+    if (request.speed != 1) return false;
+#if defined(_WIN32)
+    return true;
+#else
+    return request.option == Option::RealPlay;
+#endif
+}
+
+bool linux_h264_playback_transcode_policy(const StreamRequest& request) {
+#if defined(_WIN32)
+    (void)request;
+    return false;
+#else
+    return request.option == Option::Playback;
+#endif
+}
+
 StreamRequest parse_stream_request(const Query& query, const Config& config) {
     StreamRequest request{};
     const auto option = required(query, "option");
     if (option == "realplay") request.option = Option::RealPlay;
     else if (option == "playback") request.option = Option::Playback;
-    else throw BridgeError(400, "INVALID_PARAMETER", "option must be realplay or playback");
+    else throw BridgeError(400, "INVALID_PARAMETER", "option 必须为 realplay 或 playback");
     request.ip = required(query, "ip");
     request.port = parse_int(required(query, "port"), "port");
     request.username = required(query, "username");
@@ -404,26 +566,26 @@ StreamRequest parse_stream_request(const Query& query, const Config& config) {
     else if (channel_type == "analog") request.channel_type = ChannelType::Analog;
     else if (channel_type == "digital" || channel_type == "ip") request.channel_type = ChannelType::Digital;
     else if (channel_type == "digitalIndex") request.channel_type = ChannelType::DigitalIndex;
-    else throw BridgeError(400, "INVALID_PARAMETER", "channelType must be auto, analog, digital, digitalIndex or ip");
+    else throw BridgeError(400, "INVALID_PARAMETER", "channelType 必须为 auto、analog、digital、digitalIndex 或 ip");
     const auto stream = query.count("stream") ? query.at("stream") : "main";
     if (stream == "main") request.stream = Stream::Main;
     else if (stream == "sub") request.stream = Stream::Sub;
-    else throw BridgeError(400, "INVALID_PARAMETER", "stream must be main or sub");
+    else throw BridgeError(400, "INVALID_PARAMETER", "stream 必须为 main 或 sub");
     const auto speed_text = query.count("speed") ? query.at("speed") : "1";
-    try { request.speed = std::stod(speed_text); } catch (...) { throw BridgeError(400, "INVALID_PARAMETER", "unsupported speed"); }
+    try { request.speed = std::stod(speed_text); } catch (...) { throw BridgeError(400, "INVALID_PARAMETER", "不支持的播放速度"); }
     const std::set<double> valid_speeds{16, 8, 4, 2, 1, .5, .25, .125, .0625};
-    if (!valid_speeds.count(request.speed)) throw BridgeError(400, "INVALID_PARAMETER", "unsupported speed");
+    if (!valid_speeds.count(request.speed)) throw BridgeError(400, "INVALID_PARAMETER", "不支持的播放速度");
     if (request.port < 1 || request.port > 65535 || request.camera < 0 || (request.channel_type != ChannelType::DigitalIndex && request.camera < 1) || request.ip.size() > 128 || request.username.size() > 63 || request.password.size() > 63 || request.sid.size() > 128 || !is_safe_session_id(request.sid)) {
-        throw BridgeError(400, "INVALID_PARAMETER", "NVR parameter is out of range");
+        throw BridgeError(400, "INVALID_PARAMETER", "NVR 参数超出允许范围");
     }
     if (request.option == Option::Playback) {
         request.start = parse_long(required(query, "start"), "start");
         request.end = parse_long(required(query, "end"), "end");
         if (request.start < 0 || request.end <= request.start || request.end - request.start > config.max_playback_seconds) {
-            throw BridgeError(400, "INVALID_PARAMETER", "invalid playback time range");
+            throw BridgeError(400, "INVALID_PARAMETER", "回放时间范围无效");
         }
     } else if (request.speed != 1) {
-        throw BridgeError(400, "INVALID_PARAMETER", "realplay only supports speed=1");
+        throw BridgeError(400, "INVALID_PARAMETER", "实时预览仅支持 speed=1");
     }
     return request;
 }
@@ -477,7 +639,7 @@ private:
 NET_DVR_TIME unix_to_nvr_time(long long seconds) {
     const std::time_t local_seconds = static_cast<std::time_t>(seconds);
     std::tm value{};
-    localtime_r(&local_seconds, &value);
+    local_time_safe(local_seconds, value);
     NET_DVR_TIME result{};
     result.dwYear = value.tm_year + 1900;
     result.dwMonth = value.tm_mon + 1;
@@ -537,19 +699,25 @@ class HcNetRuntime {
 public:
     explicit HcNetRuntime(const Config& config) {
         const auto sdk = fs::absolute(config.sdk_directory);
+#if defined(_WIN32)
+        const auto library = sdk / "HCNetSDK.dll";
+        if (!fs::exists(library)) throw BridgeError(500, "SDK_NOT_FOUND", "目录中缺少 HCNetSDK.dll：" + sdk.string());
+        if (!SetDllDirectoryW(sdk.wstring().c_str())) throw BridgeError(500, "SDK_LOAD_FAILED", "设置 HCNetSDK 目录失败，系统错误=" + std::to_string(GetLastError()));
+#else
         const auto crypto = sdk / "libcrypto.so.3";
         const auto ssl = sdk / "libssl.so.3";
         if (!fs::exists(sdk / "libhcnetsdk.so") || !fs::exists(crypto) || !fs::exists(ssl)) {
-            throw BridgeError(500, "SDK_NOT_FOUND", "HCNetSDK libraries are incomplete in " + sdk.string());
+            throw BridgeError(500, "SDK_NOT_FOUND", "HCNetSDK 库文件不完整：" + sdk.string());
         }
         NET_DVR_LOCAL_SDK_PATH sdk_path{};
         std::snprintf(sdk_path.sPath, sizeof(sdk_path.sPath), "%s", sdk.c_str());
         NET_DVR_SetSDKInitCfg(NET_SDK_INIT_CFG_SDK_PATH, &sdk_path);
         NET_DVR_SetSDKInitCfg(NET_SDK_INIT_CFG_LIBEAY_PATH, const_cast<char*>(crypto.c_str()));
         NET_DVR_SetSDKInitCfg(NET_SDK_INIT_CFG_SSLEAY_PATH, const_cast<char*>(ssl.c_str()));
+#endif
         NET_DVR_SetConnectTime(3000, 2);
         NET_DVR_SetReconnect(10000, TRUE);
-        if (!NET_DVR_Init()) throw BridgeError(500, "SDK_INIT_FAILED", "NET_DVR_Init failed, error=" + std::to_string(NET_DVR_GetLastError()));
+        if (!NET_DVR_Init()) throw BridgeError(500, "SDK_INIT_FAILED", "NET_DVR_Init 初始化失败，错误码=" + std::to_string(NET_DVR_GetLastError()));
         initialized_ = true;
         log_line("INFO", "HCNetSDK 初始化成功：目录=" + sdk.string() + "。");
     }
@@ -617,20 +785,20 @@ public:
         const bool digital = is_digital(camera);
         if (requested_type == ChannelType::Analog) {
             if (analog_count_ <= 0) throw unsupported_analog(camera);
-            if (!analog) throw BridgeError(422, "ANALOG_CHANNEL_OUT_OF_RANGE", "camera=" + std::to_string(camera) + " is not in the NVR analog channel range " + channel_range(analog_start_, analog_count_));
+            if (!analog) throw BridgeError(422, "ANALOG_CHANNEL_OUT_OF_RANGE", "camera=" + std::to_string(camera) + " 不在 NVR 模拟通道范围 " + channel_range(analog_start_, analog_count_) + " 内");
             ensure_analog_enabled(camera);
             resolved_type = ResolvedChannelType::Analog;
             return camera;
         }
         if (requested_type == ChannelType::Digital) {
-            if (digital_count_ <= 0) throw BridgeError(422, "DIGITAL_CHANNEL_UNSUPPORTED", "NVR reports no digital/IP channels");
-            if (!digital) throw BridgeError(422, "DIGITAL_CHANNEL_OUT_OF_RANGE", "camera=" + std::to_string(camera) + " is not in the NVR digital/IP channel range " + channel_range(digital_start_, digital_count_));
+            if (digital_count_ <= 0) throw BridgeError(422, "DIGITAL_CHANNEL_UNSUPPORTED", "NVR 未报告数字/IP 通道");
+            if (!digital) throw BridgeError(422, "DIGITAL_CHANNEL_OUT_OF_RANGE", "camera=" + std::to_string(camera) + " 不在 NVR 数字/IP 通道范围 " + channel_range(digital_start_, digital_count_) + " 内");
             resolved_type = ResolvedChannelType::Digital;
             return camera;
         }
         if (requested_type == ChannelType::DigitalIndex) {
-            if (digital_count_ <= 0) throw BridgeError(422, "DIGITAL_CHANNEL_UNSUPPORTED", "NVR reports no digital/IP channels");
-            if (camera < 0 || camera >= digital_count_) throw BridgeError(422, "DIGITAL_CHANNEL_INDEX_OUT_OF_RANGE", "camera=" + std::to_string(camera) + " is not in the zero-based digital channel index range 0-" + std::to_string(digital_count_ - 1));
+            if (digital_count_ <= 0) throw BridgeError(422, "DIGITAL_CHANNEL_UNSUPPORTED", "NVR 未报告数字/IP 通道");
+            if (camera < 0 || camera >= digital_count_) throw BridgeError(422, "DIGITAL_CHANNEL_INDEX_OUT_OF_RANGE", "camera=" + std::to_string(camera) + " 不在从零开始的数字通道序号范围 0-" + std::to_string(digital_count_ - 1) + " 内");
             resolved_type = ResolvedChannelType::Digital;
             return digital_start_ + camera;
         }
@@ -643,7 +811,7 @@ public:
             resolved_type = ResolvedChannelType::Digital;
             return camera;
         }
-        throw BridgeError(422, "CHANNEL_NOT_FOUND", "camera=" + std::to_string(camera) + " is not reported by this NVR; analog=" + channel_range(analog_start_, analog_count_) + ", digital=" + channel_range(digital_start_, digital_count_));
+        throw BridgeError(422, "CHANNEL_NOT_FOUND", "NVR 未报告 camera=" + std::to_string(camera) + "；模拟通道=" + channel_range(analog_start_, analog_count_) + "，数字通道=" + channel_range(digital_start_, digital_count_));
     }
 
 private:
@@ -652,12 +820,12 @@ private:
     void ensure_analog_enabled(int camera) const {
         const int index = camera - analog_start_;
         if (ip_parameter_config_read_ && (index < 0 || index >= MAX_CHANNUM_V30 || !analog_enabled_[static_cast<size_t>(index)])) {
-            throw BridgeError(422, "ANALOG_CHANNEL_DISABLED", "camera=" + std::to_string(camera) + " is an analog channel but is disabled or has no analog input configured on the NVR");
+            throw BridgeError(422, "ANALOG_CHANNEL_DISABLED", "camera=" + std::to_string(camera) + " 是模拟通道，但已禁用或 NVR 未配置模拟输入");
         }
     }
     BridgeError unsupported_analog(int camera) const {
         const auto start = digital_start_ > 0 ? std::to_string(digital_start_) : "33";
-        return BridgeError(422, "ANALOG_CHANNEL_UNSUPPORTED", "camera=" + std::to_string(camera) + " requested as analog, but this NVR reports no analog channels; use the NVR digital/IP SDK channel number (often starting at " + start + ") for an IP camera");
+        return BridgeError(422, "ANALOG_CHANNEL_UNSUPPORTED", "camera=" + std::to_string(camera) + " 被指定为模拟通道，但 NVR 未报告模拟通道；IP 摄像机请使用 NVR 的数字/IP SDK 通道号（通常从 " + start + " 开始）");
     }
     int enabled_analog_count() const {
         int result = 0;
@@ -689,7 +857,7 @@ void probe_nvr_endpoint(const StreamRequest& request, int timeout_ms) {
     addrinfo* addresses = nullptr;
     const int resolve_error = ::getaddrinfo(request.ip.c_str(), std::to_string(request.port).c_str(), &hints, &addresses);
     if (resolve_error != 0) {
-        log_line("WARN", "sid=" + request.sid + " NVR SDK 地址解析失败：设备=" + target + "，原因=" + ::gai_strerror(resolve_error) + "。");
+        log_line("WARN", "sid=" + request.sid + " NVR SDK 地址解析失败：设备=" + target + "，原因=" + address_error_text(resolve_error) + "。");
         throw BridgeError(502, "NVR_UNREACHABLE", "无法连接 NVR " + target + " 的 SDK 端口；请检查设备 IP、SDK 端口、网络连通性或防火墙。");
     }
 
@@ -700,37 +868,57 @@ void probe_nvr_endpoint(const StreamRequest& request, int timeout_ms) {
         const int remaining = timeout_ms - static_cast<int>(elapsed);
         if (remaining <= 0) break;
 
-        const int fd = ::socket(item->ai_family, item->ai_socktype, item->ai_protocol);
-        if (fd < 0) {
-            last_error = errno;
+        const socket_handle fd = ::socket(item->ai_family, item->ai_socktype, item->ai_protocol);
+        if (fd == invalid_socket) {
+            last_error = socket_last_error();
             continue;
         }
+#if defined(_WIN32)
+        u_long nonblocking = 1;
+        if (::ioctlsocket(fd, FIONBIO, &nonblocking) != 0) {
+            last_error = socket_last_error();
+            close_socket(fd);
+            continue;
+        }
+#else
         const int flags = ::fcntl(fd, F_GETFL, 0);
         if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
             last_error = errno;
-            ::close(fd);
+            close_socket(fd);
             continue;
         }
+#endif
         if (::connect(fd, item->ai_addr, item->ai_addrlen) == 0) {
             connected = true;
-            ::close(fd);
+            close_socket(fd);
             break;
         }
-        if (errno == EINPROGRESS) {
-            pollfd poll_fd{};
+        const int connect_error = socket_last_error();
+        if (socket_would_block(connect_error)) {
+            platform_pollfd poll_fd{};
             poll_fd.fd = fd;
-            poll_fd.events = POLLOUT;
-            const int poll_result = ::poll(&poll_fd, 1, remaining);
+            poll_fd.events = platform_pollout;
+            const int poll_result = poll_socket(&poll_fd, 1, remaining);
             if (poll_result > 0) {
-                socklen_t length = sizeof(last_error);
+                socket_length length = sizeof(last_error);
+#if defined(_WIN32)
+                if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&last_error), &length) == 0 && last_error == 0) connected = true;
+#else
                 if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &last_error, &length) == 0 && last_error == 0) connected = true;
+#endif
             } else {
-                last_error = poll_result == 0 ? ETIMEDOUT : errno;
+                last_error = poll_result == 0 ?
+#if defined(_WIN32)
+                    WSAETIMEDOUT
+#else
+                    ETIMEDOUT
+#endif
+                    : socket_last_error();
             }
         } else {
-            last_error = errno;
+            last_error = connect_error;
         }
-        ::close(fd);
+        close_socket(fd);
     }
     ::freeaddrinfo(addresses);
 
@@ -795,13 +983,13 @@ public:
         if (!stream_started_) {
             if (request_.option == Option::RealPlay) start_realplay(); else start_playback();
             stream_started_ = true;
-            log_line("INFO", "sid=" + request_.sid + " NVR 通道建流已提交：模式=" + std::string(request_.option == Option::RealPlay ? "实时预览" : "视频回放") + "，请求通道=" + std::to_string(request_.camera) + "，请求类型=" + channel_type_name(request_.channel_type) + "，实际通道=" + std::to_string(sdk_camera_) + "，实际类型=" + resolved_channel_type_name(resolved_channel_type_) + "，码流=" + (request_.stream == Stream::Main ? "主码流" : "子码流") + "，速度=" + std::to_string(request_.speed) + "x。");
+        log_line("INFO", "sid=" + request_.sid + " NVR 通道建流已提交：模式=" + std::string(request_.option == Option::RealPlay ? "实时预览" : "视频回放") + "，请求通道=" + std::to_string(request_.camera) + "，请求类型=" + channel_type_name(request_.channel_type) + "，实际通道=" + std::to_string(sdk_camera_) + "，实际类型=" + resolved_channel_type_name(resolved_channel_type_) + "，码流=" + (request_.stream == Stream::Main ? "主码流" : "子码流") + "，速度=" + std::to_string(request_.speed) + "x。");
         }
         std::unique_lock<std::mutex> lock(first_mutex_);
         if (!first_cv_.wait_for(lock, std::chrono::milliseconds(config_.sdk_start_ms), [&] { return first_data_ || overflow_; })) {
-            throw BridgeError(504, "SDK_STREAM_TIMEOUT", "waiting for HCNetSDK stream timed out");
+            throw BridgeError(504, "SDK_STREAM_TIMEOUT", "等待 HCNetSDK 视频数据超时");
         }
-        if (overflow_) throw BridgeError(502, "MEDIA_QUEUE_OVERFLOW", "HCNetSDK media queue backpressure limit exceeded");
+        if (overflow_) throw BridgeError(502, "MEDIA_QUEUE_OVERFLOW", "HCNetSDK 媒体队列超过背压限制");
         log_line("INFO", "sid=" + request_.sid + " HCNetSDK 已获取首个视频数据。");
     }
 
@@ -977,11 +1165,13 @@ private:
     std::thread monitor_;
 };
 
-bool write_all(int fd, const uint8_t* data, size_t size) {
+bool write_socket_all(socket_handle fd, const uint8_t* data, size_t size) {
     while (size > 0) {
-        const ssize_t sent = ::write(fd, data, size);
+        const int sent = ::send(fd, reinterpret_cast<const char*>(data), static_cast<int>(std::min<size_t>(size, 64 * 1024)), 0);
         if (sent > 0) { data += sent; size -= static_cast<size_t>(sent); continue; }
+#if !defined(_WIN32)
         if (sent < 0 && errno == EINTR) continue;
+#endif
         return false;
     }
     return true;
@@ -1091,75 +1281,199 @@ private:
     std::map<std::string, Entry> items_;
 };
 
+enum class HardwareBackend { None, NvidiaNvenc, IntelQsv, AmdAmf };
+
+struct FfmpegTranscodePlan {
+    bool hardware_enabled{false};
+    std::string backend_name{"software"};
+    std::string video_encoder;
+};
+
+#if defined(_WIN32)
+struct CapturedProcessResult {
+    int exit_code{-1};
+    bool timed_out{false};
+    std::string output;
+};
+
+CapturedProcessResult run_windows_process(const fs::path& executable, const std::vector<std::string>& arguments, int timeout_ms) {
+    CapturedProcessResult result;
+    SECURITY_ATTRIBUTES attributes{sizeof(attributes), nullptr, TRUE};
+    HANDLE output_read = nullptr;
+    HANDLE output_write = nullptr;
+    if (!CreatePipe(&output_read, &output_write, &attributes, 0)) return result;
+    SetHandleInformation(output_read, HANDLE_FLAG_INHERIT, 0);
+
+    std::wstring command = quote_windows_argument(executable.wstring());
+    for (const auto& argument : arguments) command += L" " + quote_windows_argument(utf8_to_wide(argument));
+    std::vector<wchar_t> mutable_command(command.begin(), command.end());
+    mutable_command.push_back(L'\0');
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = output_write;
+    startup.hStdError = output_write;
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(executable.c_str(), mutable_command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+                        executable.parent_path().c_str(), &startup, &process)) {
+        CloseHandle(output_read);
+        CloseHandle(output_write);
+        return result;
+    }
+    CloseHandle(output_write);
+    CloseHandle(process.hThread);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    std::array<char, 4096> buffer{};
+    bool exited = false;
+    while (!exited) {
+        DWORD available = 0;
+        if (PeekNamedPipe(output_read, nullptr, 0, nullptr, &available, nullptr) && available > 0) {
+            DWORD count = 0;
+            if (ReadFile(output_read, buffer.data(), static_cast<DWORD>(std::min<size_t>(buffer.size(), available)), &count, nullptr) && count > 0)
+                result.output.append(buffer.data(), count);
+        }
+        exited = WaitForSingleObject(process.hProcess, 10) == WAIT_OBJECT_0;
+        if (!exited && std::chrono::steady_clock::now() >= deadline) {
+            result.timed_out = true;
+            TerminateProcess(process.hProcess, 1);
+            WaitForSingleObject(process.hProcess, INFINITE);
+            exited = true;
+        }
+    }
+    while (true) {
+        DWORD count = 0;
+        if (!ReadFile(output_read, buffer.data(), static_cast<DWORD>(buffer.size()), &count, nullptr) || count == 0) break;
+        result.output.append(buffer.data(), count);
+    }
+    DWORD exit_code = 1;
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    result.exit_code = static_cast<int>(exit_code);
+    CloseHandle(output_read);
+    CloseHandle(process.hProcess);
+    return result;
+}
+#endif
+
+class FfmpegHardwareAcceleration {
+public:
+    static FfmpegHardwareAcceleration detect(const Config& config) {
+#if !defined(_WIN32)
+        (void)config;
+        log_line("INFO", "当前平台=" HIK_BRIDGE_ARCH "，按策略使用 FFmpeg 软件转码。");
+        return {};
+#else
+        const auto requested = normalize(config.hardware_acceleration);
+        const auto software_test = run_windows_process(config.ffmpeg_path,
+            {"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1",
+             "-frames:v", "1", "-an", "-c:v", config.video_encoder, "-f", "null", "-"},
+            config.hardware_probe_timeout_ms);
+        if (software_test.timed_out || software_test.exit_code != 0)
+            throw BridgeError(500, "FFMPEG_SOFTWARE_ENCODER_UNAVAILABLE", "FFmpeg 软件 H.264 编码器探测失败");
+        log_line("INFO", "Windows FFmpeg 软件转码兜底探测成功：编码器=" + config.video_encoder + "。");
+        if (requested == "off") {
+            log_line("INFO", "Windows FFmpeg 硬件转码已由配置关闭，将使用软件转码。");
+            return {};
+        }
+        const auto hwaccels = run_windows_process(config.ffmpeg_path, {"-hide_banner", "-hwaccels"}, config.hardware_probe_timeout_ms);
+        const auto encoders = run_windows_process(config.ffmpeg_path, {"-hide_banner", "-encoders"}, config.hardware_probe_timeout_ms);
+        if (hwaccels.timed_out || encoders.timed_out || hwaccels.exit_code != 0 || encoders.exit_code != 0) {
+            log_line("WARN", "Windows FFmpeg 硬件能力探测失败或超时，将使用软件转码。");
+            return {};
+        }
+        for (const auto& candidate : candidates(requested)) {
+            if (!has_token(hwaccels.output, candidate.method) || !has_token(encoders.output, candidate.encoder)) continue;
+            const auto test = run_windows_process(config.ffmpeg_path,
+                {"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1",
+                 "-frames:v", "1", "-an", "-c:v", candidate.encoder, "-f", "null", "-"},
+                config.hardware_probe_timeout_ms);
+            if (!test.timed_out && test.exit_code == 0) {
+                FfmpegHardwareAcceleration result;
+                result.backend_ = candidate.backend;
+                log_line("INFO", "Windows FFmpeg 硬件转码探测成功：后端=" + candidate.name + "，编码器=" + candidate.encoder + "。");
+                return result;
+            }
+            log_line("WARN", "Windows FFmpeg 硬件编码器真实编码测试失败：后端=" + candidate.name + "；继续尝试其他后端。");
+        }
+        log_line("WARN", "Windows 未检测到可用显卡硬件编码器，将使用 libx264 软件转码。");
+        return {};
+#endif
+    }
+
+    FfmpegTranscodePlan select_plan(VideoOutputMode output_mode, bool force_software = false) const {
+        if (output_mode == VideoOutputMode::Copy || force_software || backend_ == HardwareBackend::None) return {};
+        switch (backend_) {
+            case HardwareBackend::NvidiaNvenc: return {true, "nvidia-nvenc", "h264_nvenc"};
+            case HardwareBackend::IntelQsv: return {true, "intel-qsv", "h264_qsv"};
+            case HardwareBackend::AmdAmf: return {true, "amd-amf", "h264_amf"};
+            default: return {};
+        }
+    }
+
+    std::string backend_name() const {
+        switch (backend_) {
+            case HardwareBackend::NvidiaNvenc: return "nvidia-nvenc";
+            case HardwareBackend::IntelQsv: return "intel-qsv";
+            case HardwareBackend::AmdAmf: return "amd-amf";
+            default: return "software";
+        }
+    }
+private:
+#if defined(_WIN32)
+    struct Candidate { HardwareBackend backend; std::string name; std::string method; std::string encoder; };
+    static std::string normalize(std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (value == "none" || value == "disabled" || value == "software") return "off";
+        if (value == "nvenc" || value == "cuda") return "nvidia";
+        if (value == "intel") return "qsv";
+        if (value == "amd") return "amf";
+        return value;
+    }
+    static bool has_token(const std::string& text, const std::string& token) {
+        std::istringstream lines(text);
+        std::string line;
+        while (std::getline(lines, line)) {
+            std::istringstream fields(line);
+            std::string field;
+            while (fields >> field) if (field == token) return true;
+        }
+        return false;
+    }
+    static std::vector<Candidate> candidates(const std::string& requested) {
+        const Candidate nvidia{HardwareBackend::NvidiaNvenc, "nvidia-nvenc", "cuda", "h264_nvenc"};
+        const Candidate qsv{HardwareBackend::IntelQsv, "intel-qsv", "qsv", "h264_qsv"};
+        const Candidate amf{HardwareBackend::AmdAmf, "amd-amf", "amf", "h264_amf"};
+        if (requested == "nvidia") return {nvidia};
+        if (requested == "qsv") return {qsv};
+        if (requested == "amf") return {amf};
+        return {nvidia, qsv, amf};
+    }
+#endif
+    HardwareBackend backend_{HardwareBackend::None};
+};
+
 class FfmpegProcess {
 public:
-    FfmpegProcess(const Config& config, const StreamRequest& request, VideoOutputMode video_output_mode)
-        : config_(config), sid_(request.sid), video_output_mode_(video_output_mode) {
-        int input_pipe[2]{};
-        int output_pipe[2]{};
-        int error_pipe[2]{};
-        if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0 || ::pipe(error_pipe) != 0) throw BridgeError(500, "PIPE_FAILED", "cannot create ffmpeg pipe");
-        pid_ = ::fork();
-        if (pid_ < 0) throw BridgeError(500, "FFMPEG_START_FAILED", "cannot fork ffmpeg");
-        if (pid_ == 0) {
-            ::dup2(input_pipe[0], STDIN_FILENO);
-            ::dup2(output_pipe[1], STDOUT_FILENO);
-            ::dup2(error_pipe[1], STDERR_FILENO);
-            ::close(input_pipe[0]); ::close(input_pipe[1]); ::close(output_pipe[0]); ::close(output_pipe[1]); ::close(error_pipe[0]); ::close(error_pipe[1]);
-            // 设备码流经 HCNetSDK 管道输入；缩小探测窗口可更快生成 fMP4 初始化段。
-            std::vector<std::string> args{"ffmpeg", "-hide_banner", "-loglevel", config.ffmpeg_log_level, "-fflags", "+genpts+nobuffer", "-analyzeduration", "250000", "-probesize", "262144", "-i", "pipe:0", "-map", "0:v:0"};
-            if (video_output_mode == VideoOutputMode::Copy) args.insert(args.end(), {"-c:v", "copy"});
-            else {
-                args.insert(args.end(), {"-c:v", config.video_encoder, "-preset", config.video_preset, "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-profile:v", "high", "-level:v", "4.1", "-g", "25", "-keyint_min", "25", "-sc_threshold", "0"});
-                // 浏览器按 fMP4 PTS 播放；HCNetSDK 仅改变帧到达速度不足以实现变速，必须在此重写时间戳。
-                if (request.speed != 1) {
-                    std::ostringstream speed;
-                    speed << std::setprecision(8) << request.speed;
-                    args.insert(args.end(), {"-vf", "setpts=PTS/" + speed.str()});
-                }
-            }
-            if (config.enable_audio && request.speed == 1) args.insert(args.end(), {"-map", "0:a:0?", "-c:a", "aac", "-ar", "48000", "-ac", "2"});
-            else args.insert(args.end(), {"-an"});
-            // 250ms 分片可让 MSE 在初始化段之后更早拿到首个媒体片段。
-            args.insert(args.end(), {"-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset", "-frag_duration", "250000", "pipe:1"});
-            std::vector<char*> argv;
-            for (auto& item : args) argv.push_back(item.data());
-            argv.push_back(nullptr);
-            ::execv(config.ffmpeg_path.c_str(), argv.data());
-            _exit(127);
-        }
-        ::close(input_pipe[0]); ::close(output_pipe[1]); ::close(error_pipe[1]);
-        input_fd_ = input_pipe[1];
-        output_fd_ = output_pipe[0];
-        error_fd_ = error_pipe[0];
+    FfmpegProcess(const Config& config, const StreamRequest& request, VideoOutputMode video_output_mode,
+                  const FfmpegHardwareAcceleration& hardware, bool force_software = false)
+        : config_(config), sid_(request.sid), video_output_mode_(video_output_mode),
+          transcode_plan_(hardware.select_plan(video_output_mode, force_software)) {
+        auto arguments = build_arguments(config, request, video_output_mode, transcode_plan_);
+#if defined(_WIN32)
+        start_windows(arguments);
+#else
+        start_linux(arguments);
+#endif
         error_pump_ = std::thread([this] { read_diagnostics(); });
-        log_line("INFO", "sid=" + sid_ + " FFmpeg 转流进程已启动：模式=" + std::string(video_output_mode == VideoOutputMode::Copy ? "H.264 直通/编码探测" : "转码为 H.264") + "，速度=" + std::to_string(request.speed) + "x，音频=" + std::string(config.enable_audio && request.speed == 1 ? "启用" : "关闭") + "。");
+        log_line("INFO", "sid=" + sid_ + " FFmpeg 转流进程已启动：模式=" + std::string(video_output_mode == VideoOutputMode::Copy ? "H.264 直通/编码探测" : "转码为 H.264") +
+            "，平台=" HIK_BRIDGE_ARCH "，转码后端=" + transcode_plan_.backend_name + "，编码器=" +
+            (video_output_mode == VideoOutputMode::Copy ? "copy" : (transcode_plan_.hardware_enabled ? transcode_plan_.video_encoder : config.video_encoder)) +
+            "，速度=" + std::to_string(request.speed) + "x，音频=" + std::string(config.enable_audio && request.speed == 1 ? "启用" : "关闭") + "。");
     }
-    ~FfmpegProcess() {
-        stop_requested_.store(true);
-        if (input_fd_ >= 0) ::close(input_fd_);
-        if (output_fd_ >= 0) ::close(output_fd_);
-        if (pid_ > 0) { ::kill(pid_, SIGTERM); int status = 0; ::waitpid(pid_, &status, 0); }
-        if (error_fd_ >= 0) ::close(error_fd_);
-        if (pump_.joinable()) pump_.join();
-        if (error_pump_.joinable()) error_pump_.join();
-    }
-    // H.265 回退探测结束后立即结束探测 FFmpeg，但不关闭共享的 HCNetSDK 队列；
-    // 新的 H.264 转码进程可继续消费同一 NVR 取流，避免第二次登录和等待关键帧。
-    void stop_for_pipeline_switch() {
-        stop_requested_.store(true);
-        if (input_fd_ >= 0) { ::close(input_fd_); input_fd_ = -1; }
-        if (pid_ > 0) {
-            ::kill(pid_, SIGKILL);
-            int status = 0;
-            ::waitpid(pid_, &status, 0);
-            pid_ = -1;
-        }
-        if (pump_.joinable()) pump_.join();
-        if (output_fd_ >= 0) { ::close(output_fd_); output_fd_ = -1; }
-        if (error_fd_ >= 0) { ::close(error_fd_); error_fd_ = -1; }
-        if (error_pump_.joinable()) error_pump_.join();
-    }
+    ~FfmpegProcess() { stop_process(false); }
+    void stop_for_pipeline_switch() { stop_process(true); }
+    bool hardware_enabled() const { return transcode_plan_.hardware_enabled; }
     void start_pump(ByteQueue& queue) {
         pump_ = std::thread([this, &queue] {
             std::vector<uint8_t> data;
@@ -1172,43 +1486,216 @@ public:
                     break;
                 }
                 last_data = std::chrono::steady_clock::now();
-                if (!write_all(input_fd_, data.data(), data.size())) break;
+                if (!write_input(data.data(), data.size())) break;
             }
             if (!stop_requested_.load() && !queue.closed() && input_end_reason() != StreamEndReason::SdkDataTimeout) input_end_reason_.store(StreamEndReason::SdkDataTimeout);
             if (!stop_requested_.load() && input_end_reason() == StreamEndReason::SdkDataTimeout)
                 log_line("WARN", "sid=" + sid_ + " FFmpeg 输入超时：HCNetSDK 在 " + std::to_string(config_.no_sdk_data_ms) + "ms 内未提供数据。");
-            if (input_fd_ >= 0) { ::close(input_fd_); input_fd_ = -1; }
+            close_input();
         });
     }
     std::vector<uint8_t> read_initial(int timeout_ms) {
-        std::vector<uint8_t> result;
+        return read_until_ready({}, timeout_ms, false);
+    }
+    std::vector<uint8_t> read_first_media(std::vector<uint8_t> initial_mp4, int timeout_ms) {
+        return read_until_ready(std::move(initial_mp4), timeout_ms, true);
+    }
+    std::string diagnostic_tail() const {
+        std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+        return diagnostics_tail_;
+    }
+    io_size read(uint8_t* buffer, size_t size) {
+#if defined(_WIN32)
+        if (!output_read_) return 0;
+        DWORD count = 0;
+        return ReadFile(output_read_, buffer, static_cast<DWORD>(std::min<size_t>(size, MAXDWORD)), &count, nullptr) ? static_cast<io_size>(count) : 0;
+#else
+        return ::read(output_fd_, buffer, size);
+#endif
+    }
+    StreamEndReason input_end_reason() const { return input_end_reason_.load(); }
+private:
+    std::vector<uint8_t> read_until_ready(std::vector<uint8_t> result, int timeout_ms, bool require_media_fragment) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         uint8_t buffer[32768];
         while (std::chrono::steady_clock::now() < deadline && result.size() < 4 * 1024 * 1024) {
-            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
-            pollfd poll_fd{output_fd_, POLLIN, 0};
-            if (::poll(&poll_fd, 1, static_cast<int>(std::max<long long>(1, remaining))) <= 0) continue;
-            const ssize_t read_size = ::read(output_fd_, buffer, sizeof(buffer));
-            if (read_size <= 0) break;
+            const auto read_size = read_output_timeout(buffer, sizeof(buffer), deadline);
+            if (read_size < 0) continue;
+            if (read_size == 0) break;
             result.insert(result.end(), buffer, buffer + read_size);
-            if (contains_atom(result, "ftyp") && contains_atom(result, "moov")) return result;
+            const bool initialized = contains_atom(result, "ftyp") && contains_atom(result, "moov");
+            if (initialized && (!require_media_fragment || (contains_atom(result, "moof") && contains_atom(result, "mdat")))) return result;
         }
-        throw BridgeError(502, "FFMPEG_NO_MP4", "FFmpeg did not produce a fragmented MP4 header");
+        if (require_media_fragment && contains_atom(result, "ftyp") && contains_atom(result, "moov"))
+            throw BridgeError(504, "FFMPEG_NO_MEDIA_FRAGMENT", "FFmpeg 已生成 fMP4 初始化段，但未生成首个 moof/mdat 媒体分片");
+        throw BridgeError(502, "FFMPEG_NO_MP4", "FFmpeg 未生成 fragmented MP4 初始化数据");
     }
-    ssize_t read(uint8_t* buffer, size_t size) { return ::read(output_fd_, buffer, size); }
-    StreamEndReason input_end_reason() const { return input_end_reason_.load(); }
-private:
+    static std::vector<std::string> build_arguments(const Config& config, const StreamRequest& request, VideoOutputMode output_mode, const FfmpegTranscodePlan& plan) {
+        std::vector<std::string> args{"-hide_banner", "-loglevel", config.ffmpeg_log_level, "-fflags", "+genpts+nobuffer", "-analyzeduration", "250000", "-probesize", "262144", "-i", "pipe:0", "-map", "0:v:0"};
+        if (output_mode == VideoOutputMode::Copy) args.insert(args.end(), {"-c:v", "copy"});
+        else {
+            if (!plan.hardware_enabled) args.insert(args.end(), {"-c:v", config.video_encoder, "-preset", config.video_preset, "-tune", "zerolatency", "-pix_fmt", "yuv420p"});
+            else if (plan.video_encoder == "h264_nvenc") args.insert(args.end(), {"-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "vbr"});
+            else if (plan.video_encoder == "h264_qsv") args.insert(args.end(), {"-c:v", "h264_qsv", "-preset", "veryfast"});
+            else if (plan.video_encoder == "h264_amf") args.insert(args.end(), {"-c:v", "h264_amf", "-usage", "lowlatency", "-quality", "speed"});
+            args.insert(args.end(), {"-profile:v", "high", "-level:v", "4.1", "-g", "25", "-keyint_min", "25", "-sc_threshold", "0"});
+            if (request.speed != 1) {
+                std::ostringstream speed;
+                speed << std::setprecision(8) << request.speed;
+                args.insert(args.end(), {"-vf", "setpts=PTS/" + speed.str()});
+            }
+        }
+        if (config.enable_audio && request.speed == 1) args.insert(args.end(), {"-map", "0:a:0?", "-c:a", "aac", "-ar", "48000", "-ac", "2"});
+        else args.insert(args.end(), {"-an"});
+        args.insert(args.end(), {"-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset", "-frag_duration", "250000", "pipe:1"});
+        return args;
+    }
+#if defined(_WIN32)
+    void start_windows(const std::vector<std::string>& arguments) {
+        SECURITY_ATTRIBUTES attributes{sizeof(attributes), nullptr, TRUE};
+        HANDLE input_read = nullptr, output_write = nullptr, error_write = nullptr;
+        if (!CreatePipe(&input_read, &input_write_, &attributes, 0) || !CreatePipe(&output_read_, &output_write, &attributes, 0) ||
+            !CreatePipe(&error_read_, &error_write, &attributes, 0)) throw BridgeError(500, "PIPE_FAILED", "无法创建 FFmpeg 管道");
+        SetHandleInformation(input_write_, HANDLE_FLAG_INHERIT, 0);
+        SetHandleInformation(output_read_, HANDLE_FLAG_INHERIT, 0);
+        SetHandleInformation(error_read_, HANDLE_FLAG_INHERIT, 0);
+        std::wstring command = quote_windows_argument(config_.ffmpeg_path.wstring());
+        for (const auto& argument : arguments) command += L" " + quote_windows_argument(utf8_to_wide(argument));
+        std::vector<wchar_t> mutable_command(command.begin(), command.end());
+        mutable_command.push_back(L'\0');
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        startup.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+        startup.wShowWindow = SW_HIDE;
+        startup.hStdInput = input_read;
+        startup.hStdOutput = output_write;
+        startup.hStdError = error_write;
+        PROCESS_INFORMATION process{};
+        const BOOL started = CreateProcessW(config_.ffmpeg_path.c_str(), mutable_command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+                                             config_.ffmpeg_path.parent_path().c_str(), &startup, &process);
+        CloseHandle(input_read); CloseHandle(output_write); CloseHandle(error_write);
+        if (!started) throw BridgeError(500, "FFMPEG_START_FAILED", "启动 FFmpeg 进程失败，系统错误=" + std::to_string(GetLastError()));
+        CloseHandle(process.hThread);
+        process_ = process.hProcess;
+        job_ = CreateJobObjectW(nullptr, nullptr);
+        if (job_) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION information{};
+            information.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(job_, JobObjectExtendedLimitInformation, &information, sizeof(information));
+            AssignProcessToJobObject(job_, process_);
+        }
+    }
+#else
+    void start_linux(std::vector<std::string> arguments) {
+        int input_pipe[2]{}, output_pipe[2]{}, error_pipe[2]{};
+        if (::pipe(input_pipe) != 0 || ::pipe(output_pipe) != 0 || ::pipe(error_pipe) != 0) throw BridgeError(500, "PIPE_FAILED", "无法创建 FFmpeg 管道");
+        pid_ = ::fork();
+        if (pid_ < 0) throw BridgeError(500, "FFMPEG_START_FAILED", "无法创建 FFmpeg 子进程");
+        if (pid_ == 0) {
+            ::dup2(input_pipe[0], STDIN_FILENO); ::dup2(output_pipe[1], STDOUT_FILENO); ::dup2(error_pipe[1], STDERR_FILENO);
+            ::close(input_pipe[0]); ::close(input_pipe[1]); ::close(output_pipe[0]); ::close(output_pipe[1]); ::close(error_pipe[0]); ::close(error_pipe[1]);
+            std::vector<char*> argv{const_cast<char*>("ffmpeg")};
+            for (auto& item : arguments) argv.push_back(item.data());
+            argv.push_back(nullptr);
+            ::execv(config_.ffmpeg_path.c_str(), argv.data());
+            _exit(127);
+        }
+        ::close(input_pipe[0]); ::close(output_pipe[1]); ::close(error_pipe[1]);
+        input_fd_ = input_pipe[1]; output_fd_ = output_pipe[0]; error_fd_ = error_pipe[0];
+    }
+#endif
+    bool write_input(const uint8_t* data, size_t size) {
+        while (size > 0) {
+#if defined(_WIN32)
+            if (!input_write_) return false;
+            DWORD count = 0;
+            const DWORD part = static_cast<DWORD>(std::min<size_t>(size, 64 * 1024));
+            if (!WriteFile(input_write_, data, part, &count, nullptr) || count == 0) return false;
+#else
+            const auto count = ::write(input_fd_, data, size);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) return false;
+#endif
+            data += count; size -= static_cast<size_t>(count);
+        }
+        return true;
+    }
+    io_size read_output_timeout(uint8_t* buffer, size_t size, std::chrono::steady_clock::time_point deadline) {
+#if defined(_WIN32)
+        while (std::chrono::steady_clock::now() < deadline) {
+            DWORD available = 0;
+            if (output_read_ && PeekNamedPipe(output_read_, nullptr, 0, nullptr, &available, nullptr) && available > 0) {
+                DWORD count = 0;
+                if (ReadFile(output_read_, buffer, static_cast<DWORD>(std::min<size_t>(size, available)), &count, nullptr)) return static_cast<io_size>(count);
+                return 0;
+            }
+            if (process_ && WaitForSingleObject(process_, 0) == WAIT_OBJECT_0) return 0;
+            std::this_thread::sleep_for(10ms);
+        }
+        return -1;
+#else
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        platform_pollfd poll_fd{output_fd_, static_cast<short>(platform_pollin), 0};
+        if (poll_socket(&poll_fd, 1, static_cast<int>(std::max<long long>(1, remaining))) <= 0) return -1;
+        return ::read(output_fd_, buffer, size);
+#endif
+    }
+    void close_input() {
+#if defined(_WIN32)
+        if (input_write_) { CloseHandle(input_write_); input_write_ = nullptr; }
+#else
+        if (input_fd_ >= 0) { ::close(input_fd_); input_fd_ = -1; }
+#endif
+    }
+    void stop_process(bool immediate) {
+        if (stop_requested_.exchange(true)) return;
+        close_input();
+#if defined(_WIN32)
+        if (process_) {
+            if (immediate || WaitForSingleObject(process_, 500) == WAIT_TIMEOUT) TerminateProcess(process_, 1);
+            WaitForSingleObject(process_, INFINITE);
+        }
+#else
+        if (pid_ > 0) { ::kill(pid_, immediate ? SIGKILL : SIGTERM); int status = 0; ::waitpid(pid_, &status, 0); pid_ = -1; }
+#endif
+        if (pump_.joinable()) pump_.join();
+#if defined(_WIN32)
+        if (output_read_) { CloseHandle(output_read_); output_read_ = nullptr; }
+        if (error_read_) { CloseHandle(error_read_); error_read_ = nullptr; }
+#else
+        if (output_fd_ >= 0) { ::close(output_fd_); output_fd_ = -1; }
+        if (error_fd_ >= 0) { ::close(error_fd_); error_fd_ = -1; }
+#endif
+        if (error_pump_.joinable()) error_pump_.join();
+#if defined(_WIN32)
+        if (process_) { CloseHandle(process_); process_ = nullptr; }
+        if (job_) { CloseHandle(job_); job_ = nullptr; }
+#endif
+    }
     void read_diagnostics() {
         std::string pending;
         char buffer[1024];
-        while (error_fd_ >= 0) {
-            const ssize_t count = ::read(error_fd_, buffer, sizeof(buffer));
+        while (true) {
+            io_size count = 0;
+#if defined(_WIN32)
+            DWORD read_count = 0;
+            if (!error_read_ || !ReadFile(error_read_, buffer, sizeof(buffer), &read_count, nullptr)) break;
+            count = static_cast<io_size>(read_count);
+#else
+            if (error_fd_ < 0) break;
+            count = ::read(error_fd_, buffer, sizeof(buffer));
+#endif
             if (count <= 0) break;
             pending.append(buffer, static_cast<size_t>(count));
             size_t end = 0;
             while ((end = pending.find_first_of("\r\n")) != std::string::npos) {
                 const auto line = pending.substr(0, end);
                 pending.erase(0, end + 1);
+                if (!line.empty()) {
+                    std::lock_guard<std::mutex> lock(diagnostics_mutex_);
+                    diagnostics_tail_.append(line).push_back('\n');
+                    if (diagnostics_tail_.size() > 8192) diagnostics_tail_.erase(0, diagnostics_tail_.size() - 8192);
+                }
                 if (line.find("Video: hevc") != std::string::npos || line.find("Video: h265") != std::string::npos)
                     log_line("INFO", "sid=" + sid_ + " FFmpeg 已识别输入视频编码=H.265，处理方式=" + std::string(video_output_mode_ == VideoOutputMode::Copy ? "编码探测" : "转码为 H.264") + "。");
                 else if (line.find("Video: h264") != std::string::npos || line.find("Video: avc") != std::string::npos)
@@ -1216,18 +1703,21 @@ private:
             }
         }
     }
-    static bool contains_atom(const std::vector<uint8_t>& data, const char* atom) {
-        return std::search(data.begin(), data.end(), atom, atom + 4) != data.end();
-    }
+    static bool contains_atom(const std::vector<uint8_t>& data, const char* atom) { return std::search(data.begin(), data.end(), atom, atom + 4) != data.end(); }
     const Config& config_;
     std::string sid_;
     VideoOutputMode video_output_mode_;
+    FfmpegTranscodePlan transcode_plan_;
+#if defined(_WIN32)
+    HANDLE process_{nullptr}, job_{nullptr}, input_write_{nullptr}, output_read_{nullptr}, error_read_{nullptr};
+#else
     pid_t pid_{-1};
-    int input_fd_{-1};
-    int output_fd_{-1};
-    int error_fd_{-1};
+    int input_fd_{-1}, output_fd_{-1}, error_fd_{-1};
+#endif
     std::thread pump_;
     std::thread error_pump_;
+    mutable std::mutex diagnostics_mutex_;
+    std::string diagnostics_tail_;
     std::atomic_bool stop_requested_{false};
     std::atomic<StreamEndReason> input_end_reason_{StreamEndReason::Active};
 };
@@ -1343,28 +1833,28 @@ private:
 
 struct HttpRequest { std::string method; std::string path; Query query; };
 
-HttpRequest read_http_request(int fd) {
+HttpRequest read_http_request(socket_handle fd) {
     std::string raw;
     char buffer[4096];
     while (raw.find("\r\n\r\n") == std::string::npos && raw.size() < 16384) {
-        const ssize_t count = ::recv(fd, buffer, sizeof(buffer), 0);
+        const int count = ::recv(fd, buffer, sizeof(buffer), 0);
         if (count <= 0) throw ClientDisconnected();
         raw.append(buffer, static_cast<size_t>(count));
     }
     const auto line_end = raw.find("\r\n");
-    if (line_end == std::string::npos) throw BridgeError(400, "BAD_REQUEST", "invalid HTTP request");
+    if (line_end == std::string::npos) throw BridgeError(400, "BAD_REQUEST", "HTTP 请求无效");
     std::istringstream line(raw.substr(0, line_end));
     std::string target, version;
     HttpRequest request;
-    if (!(line >> request.method >> target >> version)) throw BridgeError(400, "BAD_REQUEST", "invalid HTTP request line");
+    if (!(line >> request.method >> target >> version)) throw BridgeError(400, "BAD_REQUEST", "HTTP 请求行无效");
     const auto query_at = target.find('?');
     request.path = target.substr(0, query_at);
     request.query = query_at == std::string::npos ? Query{} : parse_query(target.substr(query_at + 1));
     return request;
 }
 
-void send_text(int fd, const std::string& text) {
-    if (!write_all(fd, reinterpret_cast<const uint8_t*>(text.data()), text.size())) throw ClientDisconnected();
+void send_text(socket_handle fd, const std::string& text) {
+    if (!write_socket_all(fd, reinterpret_cast<const uint8_t*>(text.data()), text.size())) throw ClientDisconnected();
 }
 
 std::string json_escape(const std::string& value) {
@@ -1373,25 +1863,25 @@ std::string json_escape(const std::string& value) {
     return result;
 }
 
-void send_json_body(int fd, int status, const std::string& body) {
+void send_json_body(socket_handle fd, int status, const std::string& body) {
     const std::string status_text = status == 200 ? "OK" : status == 204 ? "No Content" : status == 400 ? "Bad Request" : status == 404 ? "Not Found" : status == 405 ? "Method Not Allowed" : status == 503 ? "Service Unavailable" : "Bad Gateway";
     send_text(fd, "HTTP/1.1 " + std::to_string(status) + " " + status_text + "\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + std::to_string(body.size()) + "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n" + body);
 }
 
-void send_json(int fd, int status, const std::string& code, const std::string& message, const std::string& sid = "") {
+void send_json(socket_handle fd, int status, const std::string& code, const std::string& message, const std::string& sid = "") {
     const std::string body = "{\"code\":\"" + json_escape(code) + "\",\"message\":\"" + json_escape(message) + "\"" + (sid.empty() ? "" : ",\"requestId\":\"" + json_escape(sid) + "\"") + "}";
     send_json_body(fd, status, body);
 }
 
 std::string format_utc(std::time_t value) {
     std::tm utc{};
-    gmtime_r(&value, &utc);
+    utc_time_safe(value, utc);
     std::ostringstream text;
     text << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
     return text.str();
 }
 
-void send_session_status(int fd, const SessionStatus& value) {
+void send_session_status(socket_handle fd, const SessionStatus& value) {
     const std::string output_ready = value.output_ready_utc ? "\"" + format_utc(*value.output_ready_utc) + "\"" : "null";
     const std::string browser_first_frame = value.browser_first_frame_utc ? "\"" + format_utc(*value.browser_first_frame_utc) + "\"" : "null";
     const std::string body = "{\"sid\":\"" + json_escape(value.sid) + "\",\"status\":\"" + json_escape(value.status) + "\",\"endReason\":\"" + json_escape(value.end_reason) + "\",\"message\":\"" + json_escape(value.message) + "\",\"queueCurrentBytes\":" + std::to_string(value.queue_current_bytes) + ",\"queuePeakBytes\":" + std::to_string(value.queue_peak_bytes) + ",\"backpressureEvents\":" + std::to_string(value.backpressure_events) + ",\"outputReadyUtc\":" + output_ready + ",\"browserFirstFrameUtc\":" + browser_first_frame + ",\"updatedUtc\":\"" + format_utc(value.updated_utc) + "\"}";
@@ -1425,7 +1915,7 @@ std::string avc_mse_codec(const std::vector<uint8_t>& initial_mp4) {
     return value.str();
 }
 
-void send_video_headers(int fd, const StreamRequest& request, const Config& config, const std::vector<uint8_t>& initial_mp4) {
+void send_video_headers(socket_handle fd, const StreamRequest& request, const Config& config, const std::vector<uint8_t>& initial_mp4) {
     // 初始化段含实际轨道；仅在存在音频轨时声明 mp4a，避免 MSE codec 列表与设备流不一致。
     const std::string video_codec = avc_mse_codec(initial_mp4);
     const std::string codecs = config.enable_audio && request.speed == 1 && initial_mp4_has_audio(initial_mp4) ? video_codec + ",mp4a.40.2" : video_codec;
@@ -1434,10 +1924,10 @@ void send_video_headers(int fd, const StreamRequest& request, const Config& conf
     send_text(fd, "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nTransfer-Encoding: chunked\r\nCache-Control: no-store, no-cache\r\nAccept-Ranges: none\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: X-Hik-Bridge-Mse-Codecs, X-Hik-Bridge-Video-Codec, X-Hik-Bridge-Playback-Start, X-Hik-Bridge-Playback-End, X-Hik-Bridge-Session-Id, X-Hik-Bridge-Session-Status-Url\r\nX-Hik-Bridge-Mse-Codecs: " + codecs + "\r\nX-Hik-Bridge-Video-Codec: h264\r\nX-Hik-Bridge-Playback-Start: " + playback_start + "\r\nX-Hik-Bridge-Playback-End: " + playback_end + "\r\nX-Hik-Bridge-Session-Id: " + request.sid + "\r\nX-Hik-Bridge-Session-Status-Url: /session-status?sid=" + request.sid + "\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n");
 }
 
-void send_chunk(int fd, const uint8_t* data, size_t size) {
+void send_chunk(socket_handle fd, const uint8_t* data, size_t size) {
     std::ostringstream head; head << std::hex << size << "\r\n";
     send_text(fd, head.str());
-    if (size && !write_all(fd, data, size)) throw ClientDisconnected();
+    if (size && !write_socket_all(fd, data, size)) throw ClientDisconnected();
     send_text(fd, "\r\n");
 }
 
@@ -1448,9 +1938,10 @@ StreamEndReason resolve_end_reason(const HcSession* session, const FfmpegProcess
     return StreamEndReason::StreamEnded;
 }
 
-void handle_video(int fd, const StreamRequest& request, const Config& config, SessionRegistry& registry, SessionStatusRegistry& statuses, VideoCodecCache& codec_cache, bool& response_started) {
+void handle_video(socket_handle fd, const StreamRequest& request, const Config& config, const FfmpegHardwareAcceleration& hardware,
+                  SessionRegistry& registry, SessionStatusRegistry& statuses, VideoCodecCache& codec_cache, bool& response_started) {
     auto lease = registry.reserve();
-    if (!lease) throw BridgeError(503, "SESSION_LIMIT", "maximum concurrent session count reached");
+    if (!lease) throw BridgeError(503, "SESSION_LIMIT", "已达到最大并发会话数");
     statuses.set_active(request.sid);
     std::unique_ptr<HcSession> session;
     std::unique_ptr<FfmpegProcess> ffmpeg;
@@ -1472,6 +1963,7 @@ void handle_video(int fd, const StreamRequest& request, const Config& config, Se
         session->prepare();
         DetectedVideoCodec detected_codec = DetectedVideoCodec::Unknown;
         std::vector<uint8_t> prefix;
+        bool restart_session_after_probe = false;
         const bool cache_hit = codec_cache.try_get(request, detected_codec);
         if (cache_hit) {
             const char* text = video_codec_name(detected_codec);
@@ -1485,7 +1977,7 @@ void handle_video(int fd, const StreamRequest& request, const Config& config, Se
             // 不释放登录、实时句柄和媒体队列。
             log_line("INFO", "sid=" + request.sid + " 开始探测输入视频编码。");
             session->start();
-            probe_ffmpeg = std::make_unique<FfmpegProcess>(config, request, VideoOutputMode::Copy);
+            probe_ffmpeg = std::make_unique<FfmpegProcess>(config, request, VideoOutputMode::Copy, hardware);
             probe_ffmpeg->start_pump(session->queue());
             auto probe_prefix = probe_ffmpeg->read_initial(config.first_media_ms);
             detected_codec = detect_video_codec(probe_prefix);
@@ -1493,21 +1985,34 @@ void handle_video(int fd, const StreamRequest& request, const Config& config, Se
             log_line("INFO", "sid=" + request.sid + " 输入视频编码探测完成：编码=" + detected_text + "。");
             codec_cache.set(request, detected_codec);
 
-            if (request.speed == 1 && detected_codec == DetectedVideoCodec::H264) {
+            if (detected_codec == DetectedVideoCodec::H264 && h264_copy_allowed(request)) {
                 prefix = std::move(probe_prefix);
                 ffmpeg = std::move(probe_ffmpeg);
                 log_line("INFO", "sid=" + request.sid + " 复用 H.264 编码探测会话，避免重复登录和取流。");
+            } else if (detected_codec == DetectedVideoCodec::H264) {
+                // 正式管线需要转码；探测进程已经消费 PS 系统头，创建转码进程前重新取流。
+                restart_session_after_probe = true;
             }
         }
 
-        // 仅 1 倍速 H.264 可零转码。快放/慢放必须以 setpts 重写 fMP4 PTS，因此需要转码。
-        auto output_mode = request.speed == 1 && detected_codec == DetectedVideoCodec::H264 ? VideoOutputMode::Copy : VideoOutputMode::H264Transcode;
+        // Windows 的 1 倍速 H.264 以及 Linux 的 H.264 实时预览可零转码；Linux H.264 回放固定转码。
+        // 所有快放/慢放仍必须通过 setpts 重写 fMP4 PTS。
+        const bool copy_h264 = detected_codec == DetectedVideoCodec::H264 && h264_copy_allowed(request);
+        auto output_mode = copy_h264 ? VideoOutputMode::Copy : VideoOutputMode::H264Transcode;
         log_line("INFO", "sid=" + request.sid + " 编码处理决策：输出=" + std::string(output_mode == VideoOutputMode::Copy ? "H.264 直通" : "转码为 H.264") + "。");
+        if (detected_codec == DetectedVideoCodec::H264 && linux_h264_playback_transcode_policy(request))
+            log_line("INFO", "sid=" + request.sid + " Linux H.264 回放兼容策略已启用：禁用直通并使用 libx264 重建时间戳、关键帧和参数集。");
         // H.265/未知编码不能复用 copy 探测进程，但继续复用同一 HCNetSDK 登录、实时句柄和媒体队列。
         if (probe_ffmpeg) {
             probe_ffmpeg->stop_for_pipeline_switch();
             probe_ffmpeg.reset();
             log_line("INFO", "sid=" + request.sid + " 编码探测 FFmpeg 已停止，复用同一 HCNetSDK 取流会话创建正式转码管线。");
+        }
+        if (restart_session_after_probe) {
+            session.reset();
+            session = std::make_unique<HcSession>(request, config);
+            session->prepare();
+            log_line("INFO", "sid=" + request.sid + " Linux H.264 回放探测后已重新建立 HCNetSDK 会话，确保正式转码从完整 PS 头开始。");
         }
         if (!session) {
             session = std::make_unique<HcSession>(request, config);
@@ -1516,22 +2021,76 @@ void handle_video(int fd, const StreamRequest& request, const Config& config, Se
         if (!session->stream_started()) {
             session->start();
         }
-        if (!ffmpeg) {
-            ffmpeg = std::make_unique<FfmpegProcess>(config, request, output_mode);
+        const auto start_pipeline = [&](VideoOutputMode mode, bool force_software) {
+            // 仅 Windows 的 H.265→H.264 场景允许选择显卡；H.264 直通和倍速软件转码不启用硬件后端。
+            const bool use_software = force_software || detected_codec != DetectedVideoCodec::H265;
+            ffmpeg = std::make_unique<FfmpegProcess>(config, request, mode, hardware, use_software);
             ffmpeg->start_pump(session->queue());
-            prefix = ffmpeg->read_initial(config.first_media_ms);
+            // 浏览器通常会在数秒内判定首帧超时。copy 只给较短窗口，失败后为重新登录和转码预留时间。
+            const int ready_timeout_ms = mode == VideoOutputMode::Copy ? std::min(config.first_media_ms, 2000) : config.first_media_ms;
+            prefix = ffmpeg->read_first_media({}, ready_timeout_ms);
+        };
+        bool copy_fallback_required = false;
+        if (ffmpeg) {
+            try {
+                // 编码探测只需 ftyp/moov；正式响应浏览器前必须继续等到首个媒体分片。
+                prefix = ffmpeg->read_first_media(std::move(prefix), std::min(config.first_media_ms, 2000));
+            } catch (const BridgeError& error) {
+                if (output_mode != VideoOutputMode::Copy) throw;
+                copy_fallback_required = true;
+                log_line("WARN", "sid=" + request.sid + " H.264 直通未生成可播放媒体分片：错误码=" + error.code + "；将重新取流并转码为 H.264。");
+            }
+        } else {
+            try {
+                start_pipeline(output_mode, false);
+            } catch (const BridgeError& error) {
+                if (output_mode == VideoOutputMode::Copy) {
+                    copy_fallback_required = true;
+                    log_line("WARN", "sid=" + request.sid + " H.264 直通未生成可播放媒体分片：错误码=" + error.code + "；将重新取流并转码为 H.264。");
+                } else {
+                    if (!ffmpeg || !ffmpeg->hardware_enabled()) throw;
+                    log_line("WARN", "sid=" + request.sid + " Windows 硬件转码管线启动失败，将复用 HCNetSDK 会话回退到 libx264 软件转码。");
+                    ffmpeg->stop_for_pipeline_switch();
+                    ffmpeg.reset();
+                    start_pipeline(output_mode, true);
+                }
+            }
+        }
+        if (copy_fallback_required) {
+            std::string diagnostics = ffmpeg ? trim(ffmpeg->diagnostic_tail()) : std::string{};
+            if (diagnostics.size() > 600) diagnostics.erase(0, diagnostics.size() - 600);
+            if (!diagnostics.empty()) log_line("WARN", "sid=" + request.sid + " H.264 直通 FFmpeg 诊断尾部：" + diagnostics);
+            if (ffmpeg) {
+                ffmpeg->stop_for_pipeline_switch();
+                ffmpeg.reset();
+            }
+            // copy 进程已经消费了 PS 系统头和部分码流；重新取流，确保转码从完整 PS 头及关键帧开始。
+            session.reset();
+            session = std::make_unique<HcSession>(request, config);
+            session->prepare();
+            session->start();
+            output_mode = VideoOutputMode::H264Transcode;
+            start_pipeline(output_mode, true);
+            log_line("INFO", "sid=" + request.sid + " H.264 直通已自动降级为 H.264 软件转码，首个媒体分片已就绪。");
         }
         // 个别旧 NVR 的压缩配置可能与实际 IP 通道码流不一致。以 fMP4 初始化段作最后校验；
         // 若“配置 H.264”实际为 H.265，继续复用当前 HCNetSDK 会话，仅替换 FFmpeg 转码管线。
         if (output_mode == VideoOutputMode::Copy && detect_video_codec(prefix) == DetectedVideoCodec::H265) {
             log_line("WARN", "sid=" + request.sid + " NVR 编码配置与实际码流不一致：配置为 H.264，实际为 H.265；将复用当前 HCNetSDK 会话切换为 H.264 转码。");
+            detected_codec = DetectedVideoCodec::H265;
             codec_cache.set(request, DetectedVideoCodec::H265);
             ffmpeg->stop_for_pipeline_switch();
             ffmpeg.reset();
             output_mode = VideoOutputMode::H264Transcode;
-            ffmpeg = std::make_unique<FfmpegProcess>(config, request, output_mode);
-            ffmpeg->start_pump(session->queue());
-            prefix = ffmpeg->read_initial(config.first_media_ms);
+            try {
+                start_pipeline(output_mode, false);
+            } catch (const BridgeError&) {
+                if (!ffmpeg || !ffmpeg->hardware_enabled()) throw;
+                log_line("WARN", "sid=" + request.sid + " Windows H.265 硬件转码失败，将复用 HCNetSDK 会话回退到 libx264 软件转码。");
+                ffmpeg->stop_for_pipeline_switch();
+                ffmpeg.reset();
+                start_pipeline(output_mode, true);
+            }
         }
         log_line("INFO", "sid=" + request.sid + " 视频输出已就绪，开始向浏览器传输：初始化数据=" + std::to_string(prefix.size()) + " 字节。");
         statuses.set_output_ready(request.sid);
@@ -1541,7 +2100,7 @@ void handle_video(int fd, const StreamRequest& request, const Config& config, Se
         uint8_t buffer[65536];
         StreamEndReason reason = StreamEndReason::Active;
         while (g_running.load()) {
-            const ssize_t count = ffmpeg->read(buffer, sizeof(buffer));
+            const io_size count = ffmpeg->read(buffer, sizeof(buffer));
             if (count <= 0) {
                 reason = resolve_end_reason(session.get(), ffmpeg.get());
                 break;
@@ -1564,77 +2123,78 @@ void handle_video(int fd, const StreamRequest& request, const Config& config, Se
     }
 }
 
-void handle_connection(int fd, const Config& config, SessionRegistry& registry, SessionStatusRegistry& statuses, VideoCodecCache& codec_cache) {
+void handle_connection(socket_handle fd, const Config& config, const FfmpegHardwareAcceleration& hardware,
+                       SessionRegistry& registry, SessionStatusRegistry& statuses, VideoCodecCache& codec_cache) {
     bool response_started = false;
     std::string sid;
     try {
         const auto request = read_http_request(fd);
         if (request.method == "OPTIONS") { send_text(fd, "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\n\r\n"); return; }
-        if (request.method != "GET") throw BridgeError(405, "METHOD_NOT_ALLOWED", "only GET is supported");
+        if (request.method != "GET") throw BridgeError(405, "METHOD_NOT_ALLOWED", "仅支持 GET 请求");
         if (request.path == "/healthz" || request.path == "/") {
-            send_json_body(fd, 200, "{\"status\":\"ok\",\"sdk\":\"hcnetsdk\",\"activeSessions\":" + std::to_string(registry.active()) + ",\"hardwareAcceleration\":\"software\"}");
+            send_json_body(fd, 200, "{\"status\":\"ok\",\"sdk\":\"hcnetsdk\",\"activeSessions\":" + std::to_string(registry.active()) + ",\"hardwareAcceleration\":\"" + hardware.backend_name() + "\"}");
             return;
         }
         if (request.path == "/version") {
-            send_json_body(fd, 200, "{\"name\":\"hik-sdk-http-bridge\",\"version\":\"1.0.0\",\"framework\":\"C++17\",\"architecture\":\"linux-amd64\",\"hardwareAcceleration\":\"software\"}");
+            send_json_body(fd, 200, "{\"name\":\"hik-sdk-http-bridge\",\"version\":\"1.0.0\",\"framework\":\"C++17\",\"architecture\":\"" HIK_BRIDGE_ARCH "\",\"hardwareAcceleration\":\"" + hardware.backend_name() + "\"}");
             return;
         }
         if (request.path == "/session-status") {
             const auto sid_value = request.query.find("sid");
-            if (sid_value == request.query.end() || sid_value->second.empty()) throw BridgeError(400, "INVALID_PARAMETER", "sid is required");
+            if (sid_value == request.query.end() || sid_value->second.empty()) throw BridgeError(400, "INVALID_PARAMETER", "缺少必填参数 sid");
             const auto status = statuses.get(sid_value->second);
-            if (!status) { send_json(fd, 404, "SESSION_NOT_FOUND", "session status is unavailable", sid_value->second); return; }
+            if (!status) { send_json(fd, 404, "SESSION_NOT_FOUND", "会话状态不可用", sid_value->second); return; }
             send_session_status(fd, *status);
             return;
         }
         if (request.path == "/session-rendered") {
             const auto sid_value = request.query.find("sid");
-            if (sid_value == request.query.end() || sid_value->second.empty()) throw BridgeError(400, "INVALID_PARAMETER", "sid is required");
+            if (sid_value == request.query.end() || sid_value->second.empty()) throw BridgeError(400, "INVALID_PARAMETER", "缺少必填参数 sid");
             long long client_elapsed_ms = 0;
             const auto elapsed_value = request.query.find("elapsedMs");
             try { if (elapsed_value != request.query.end()) client_elapsed_ms = std::stoll(elapsed_value->second); }
-            catch (...) { throw BridgeError(400, "INVALID_PARAMETER", "elapsedMs is invalid"); }
-            if (client_elapsed_ms < 0 || client_elapsed_ms > 600000) throw BridgeError(400, "INVALID_PARAMETER", "elapsedMs is invalid");
+            catch (...) { throw BridgeError(400, "INVALID_PARAMETER", "elapsedMs 无效"); }
+            if (client_elapsed_ms < 0 || client_elapsed_ms > 600000) throw BridgeError(400, "INVALID_PARAMETER", "elapsedMs 无效");
             const auto timing = statuses.set_browser_first_frame(sid_value->second, client_elapsed_ms);
-            if (!timing) { send_json(fd, 404, "SESSION_NOT_FOUND", "session status is unavailable", sid_value->second); return; }
+            if (!timing) { send_json(fd, 404, "SESSION_NOT_FOUND", "会话状态不可用", sid_value->second); return; }
             log_line("INFO", "sid=" + sid_value->second + " 浏览器首帧已渲染：服务端总耗时=" + std::to_string(timing->first) + "ms，视频输出至渲染=" + std::to_string(timing->second) + "ms，浏览器上报=" + std::to_string(client_elapsed_ms) + "ms。");
             send_json_body(fd, 200, "{\"status\":\"ok\"}");
             return;
         }
-        if (request.path != "/video") throw BridgeError(404, "NOT_FOUND", "endpoint not found");
+        if (request.path != "/video") throw BridgeError(404, "NOT_FOUND", "接口不存在");
         const auto stream_request = parse_stream_request(request.query, config);
         sid = stream_request.sid;
         log_line("INFO", "sid=" + sid + " 收到视频播放请求。");
-        handle_video(fd, stream_request, config, registry, statuses, codec_cache, response_started);
+        handle_video(fd, stream_request, config, hardware, registry, statuses, codec_cache, response_started);
     } catch (const ClientDisconnected&) {
         log_line("INFO", "sid=" + sid + " 浏览器已主动停止或替换视频流，开始释放资源。");
     } catch (const BridgeError& error) {
         log_line("WARN", "sid=" + sid + " 请求失败：错误码=" + error.code + "，HTTP 状态=" + std::to_string(error.http_status) + "。");
         if (!response_started) { try { send_json(fd, error.http_status, error.code, error.what(), sid); } catch (...) {} }
-    } catch (const std::exception& error) {
+    } catch (const std::exception&) {
         log_line("ERROR", std::string("sid=") + sid + " 出现未处理异常。");
-        if (!response_started) { try { send_json(fd, 500, "INTERNAL_ERROR", "internal server error", sid); } catch (...) {} }
+        if (!response_started) { try { send_json(fd, 500, "INTERNAL_ERROR", "服务内部错误", sid); } catch (...) {} }
     }
 }
 
-int create_listener(const Config& config) {
+socket_handle create_listener(const Config& config) {
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
     addrinfo* addresses = nullptr;
-    if (::getaddrinfo(config.bind.c_str(), std::to_string(config.port).c_str(), &hints, &addresses) != 0) throw BridgeError(500, "BIND_FAILED", "invalid bind address");
-    int listener = -1;
+    if (::getaddrinfo(config.bind.c_str(), std::to_string(config.port).c_str(), &hints, &addresses) != 0) throw BridgeError(500, "BIND_FAILED", "监听地址无效");
+    socket_handle listener = invalid_socket;
     for (auto* current = addresses; current; current = current->ai_next) {
         listener = ::socket(current->ai_family, current->ai_socktype, current->ai_protocol);
-        if (listener < 0) continue;
+        if (listener == invalid_socket) continue;
         const int on = 1;
-        ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+        ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&on), sizeof(on));
         if (::bind(listener, current->ai_addr, current->ai_addrlen) == 0 && ::listen(listener, 32) == 0) break;
-        ::close(listener); listener = -1;
+        close_socket(listener); listener = invalid_socket;
     }
     ::freeaddrinfo(addresses);
-    if (listener < 0) throw BridgeError(500, "BIND_FAILED", "cannot bind HTTP listener");
+    if (listener == invalid_socket) throw BridgeError(500, "BIND_FAILED", "无法绑定 HTTP 监听端口");
     return listener;
 }
 
@@ -1645,29 +2205,55 @@ bool is_local_ipv4_client(const sockaddr_storage& peer) {
 }
 
 void run_server(const Config& config) {
+    NetworkRuntime network;
+    (void)network;
     HcNetRuntime sdk(config);
+    const auto hardware = FfmpegHardwareAcceleration::detect(config);
     SessionRegistry registry(config.max_sessions);
     SessionStatusRegistry statuses;
     VideoCodecCache codec_cache(config.codec_cache_seconds, config.codec_cache_file);
-    const int listener = create_listener(config);
-    log_line("INFO", "HTTP 视频桥接服务已启动：地址=http://" + config.bind + ":" + std::to_string(config.port) + "。");
+    const socket_handle listener = create_listener(config);
+    log_line("INFO", "HTTP 视频桥接服务已启动：地址=http://" + config.bind + ":" + std::to_string(config.port) + "，平台=" HIK_BRIDGE_ARCH "，转码后端=" + hardware.backend_name() + "。");
     while (g_running.load()) {
+        platform_pollfd listener_poll{listener, static_cast<short>(platform_pollin), 0};
+        const int poll_result = poll_socket(&listener_poll, 1, 500);
+        if (poll_result < 0) {
+#if !defined(_WIN32)
+            if (errno == EINTR) continue;
+#endif
+            log_line("WARN", "等待 HTTP 连接失败：系统错误=" + std::to_string(socket_last_error()) + "。");
+            continue;
+        }
+        if (poll_result == 0) continue;
         sockaddr_storage peer{};
-        socklen_t length = sizeof(peer);
-        const int client = ::accept(listener, reinterpret_cast<sockaddr*>(&peer), &length);
-        if (client < 0) { if (errno == EINTR) continue; log_line("WARN", "接受 HTTP 连接失败：系统错误=" + std::to_string(errno) + "。"); continue; }
-        if (!is_local_ipv4_client(peer)) { log_line("WARN", "已拒绝非本机 IPv4 客户端的 HTTP 请求。"); ::close(client); continue; }
-        std::thread([client, &config, &registry, &statuses, &codec_cache] { handle_connection(client, config, registry, statuses, codec_cache); ::close(client); }).detach();
+        socket_length length = sizeof(peer);
+        const socket_handle client = ::accept(listener, reinterpret_cast<sockaddr*>(&peer), &length);
+        if (client == invalid_socket) { log_line("WARN", "接受 HTTP 连接失败：系统错误=" + std::to_string(socket_last_error()) + "。"); continue; }
+        if (!is_local_ipv4_client(peer)) { log_line("WARN", "已拒绝非本机 IPv4 客户端的 HTTP 请求。"); close_socket(client); continue; }
+        std::thread([client, &config, &hardware, &registry, &statuses, &codec_cache] { handle_connection(client, config, hardware, registry, statuses, codec_cache); close_socket(client); }).detach();
     }
-    ::close(listener);
+    close_socket(listener);
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
     try {
+#if defined(_WIN32)
+        ConsoleCodePageScope console_code_pages;
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
+#else
+        std::setlocale(LC_ALL, "");
+#endif
         if (argc > 1 && (std::string(argv[1]) == "version" || std::string(argv[1]) == "--version")) { std::cout << "hik-sdk-http-bridge 1.0.0\n"; return 0; }
+#if defined(_WIN32)
+        wchar_t module[MAX_PATH]{};
+        fs::path config_path{"config.json"};
+        if (GetModuleFileNameW(nullptr, module, MAX_PATH)) config_path = fs::path(module).parent_path() / "config.json";
+#else
         fs::path config_path{"/opt/hik-bridge/config/config.json"};
+#endif
         bool validate_config_only = false;
         for (int index = 1; index < argc; ++index) {
             const std::string argument = argv[index];
@@ -1681,20 +2267,26 @@ int main(int argc, char** argv) {
             throw BridgeError(400, "INVALID_COMMAND", "");
         }
         const Config config = load_config(config_path);
+#if defined(_WIN32)
+        if (!fs::exists(config.sdk_directory / "HCNetSDK.dll")) throw BridgeError(500, "SDK_NOT_FOUND", "");
+#else
         if (!fs::exists(config.sdk_directory / "libhcnetsdk.so")) throw BridgeError(500, "SDK_NOT_FOUND", "");
+#endif
         if (!fs::exists(config.ffmpeg_path)) throw BridgeError(500, "FFMPEG_NOT_FOUND", "");
-        if (validate_config_only) { std::cout << "配置校验通过：" << fs::absolute(config_path).string() << "\n"; return 0; }
+        if (validate_config_only) { write_stdout_line("配置校验通过：" + fs::absolute(config_path).string()); return 0; }
         g_daily_logger = std::make_unique<DailyLogWriter>(config.log_directory, config.log_retention_days);
         ::signal(SIGINT, on_signal);
         ::signal(SIGTERM, on_signal);
+#if !defined(_WIN32)
         ::signal(SIGPIPE, SIG_IGN);
+#endif
         run_server(config);
         return 0;
     } catch (const BridgeError& error) {
         const bool config_error = error.code == "CONFIG_NOT_FOUND" || error.code == "INVALID_CONFIG" || error.code == "INVALID_COMMAND" || error.code == "SDK_NOT_FOUND" || error.code == "FFMPEG_NOT_FOUND";
         log_line("ERROR", std::string(config_error ? "配置错误：错误码=" : "服务启动失败：错误码=") + error.code + "。");
         return 2;
-    } catch (const std::exception& error) {
+    } catch (const std::exception&) {
         log_line("ERROR", "服务启动时发生未处理异常。");
         return 1;
     }

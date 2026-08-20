@@ -2,6 +2,11 @@
 # 该文件会在便携包根目录中以 start.sh 的名字分发。
 set -eu
 
+if command -v locale >/dev/null 2>&1 && locale -a 2>/dev/null | grep -Eiq '^C([.]UTF-?8|[.]utf8)$'; then
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8
+fi
+
 APP_HOME=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 BIN="$APP_HOME/bin/hik-sdk-http-bridge"
 SDK_DIR="$APP_HOME/sdk"
@@ -11,7 +16,7 @@ DEFAULT_CONFIG="$APP_HOME/config/config.json"
 MANIFEST="$APP_HOME/release-manifest.env"
 
 fail() {
-    printf '%s\n' "错误: $*" >&2
+    printf '%s\n' "错误：$*" >&2
     exit 1
 }
 
@@ -20,12 +25,12 @@ version_at_least() {
     [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]
 }
 
-[ "$(uname -m)" = "x86_64" ] || fail "本包仅支持 x86_64；当前架构为 $(uname -m)。ARM、龙芯、MIPS 等架构须使用对应架构 HCNetSDK 重新构建。"
-[ -x "$BIN" ] || fail "缺少或无权执行 $BIN"
-[ -x "$FFMPEG" ] || fail "缺少或无权执行随包 FFmpeg：$FFMPEG"
-[ -r "$SDK_DIR/libhcnetsdk.so" ] || fail "缺少 HCNetSDK 主库：$SDK_DIR/libhcnetsdk.so"
-[ -d "$COMPONENT_DIR" ] || fail "缺少 HCNetSDKCom 组件目录：$COMPONENT_DIR"
-[ -r "$DEFAULT_CONFIG" ] || fail "缺少默认配置：$DEFAULT_CONFIG"
+[ "$(uname -m)" = "x86_64" ] || fail "本包需要 x86_64，当前架构为 $(uname -m)；其他架构需要匹配的 HCNetSDK。"
+[ -x "$BIN" ] || fail "桥接程序缺失或不可执行：$BIN"
+[ -x "$FFMPEG" ] || fail "随包 FFmpeg 缺失或不可执行：$FFMPEG"
+[ -r "$SDK_DIR/libhcnetsdk.so" ] || fail "HCNetSDK 主库缺失：$SDK_DIR/libhcnetsdk.so"
+[ -d "$COMPONENT_DIR" ] || fail "HCNetSDKCom 组件目录缺失：$COMPONENT_DIR"
+[ -r "$DEFAULT_CONFIG" ] || fail "默认配置缺失：$DEFAULT_CONFIG"
 
 required_glibc=2.28
 if [ -r "$MANIFEST" ]; then
@@ -36,9 +41,9 @@ fi
 glibc_line=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
 case "$glibc_line" in
     glibc\ *) host_glibc=${glibc_line#glibc } ;;
-    *) fail "未检测到 glibc。当前包不支持 musl/Alpine Linux。" ;;
+    *) fail "未检测到 glibc；本包不支持 musl/Alpine Linux。" ;;
 esac
-version_at_least "$host_glibc" "$required_glibc" || fail "当前 glibc 为 $host_glibc，包至少需要 $required_glibc。请使用更低 glibc 基线构建的发布包。"
+version_at_least "$host_glibc" "$required_glibc" || fail "当前 glibc 为 $host_glibc，本包至少需要 $required_glibc。"
 
 mkdir -p "$APP_HOME/logs"
 export LD_LIBRARY_PATH="$SDK_DIR:$COMPONENT_DIR:$APP_HOME/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -51,7 +56,7 @@ if [ "${1:-}" = "--version" ]; then
 fi
 
 if [ "${1:-}" = "--config" ]; then
-    [ "$#" -ge 2 ] || fail "--config 后必须给出配置文件路径"
+    [ "$#" -ge 2 ] || fail "--config 后必须提供配置文件路径。"
     exec "$BIN" "$@"
 fi
 

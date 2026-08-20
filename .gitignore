@@ -8,3 +8,23 @@ config.local.json
 .vs/
 git access token.txt
 demo.html
+
+# 本地凭据与证书
+.env
+.env.*
+*.local.json
+*.key
+*.pem
+*.pfx
+secrets/
+
+# 厂商 SDK、参考资料和解包文件不属于开源源码
+/docs/
+
+# Windows C++ 初期验证项目，不纳入正式开源版本
+/cpp-sdk-http-bridge/
+
+# 内部设计、执行和环境记录
+/csharp_cpp_feature_diff.md
+/feature_change_log.md
+/videoplaybackhttpbridge.md

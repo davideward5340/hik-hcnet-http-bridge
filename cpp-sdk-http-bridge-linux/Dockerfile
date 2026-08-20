@@ -8,6 +8,7 @@ COPY vendor/hcnetsdk ./vendor/hcnetsdk
 RUN cmake -S . -B out -DCMAKE_BUILD_TYPE=Release && cmake --build out --parallel
 
 FROM debian:12-slim
+LABEL org.opencontainers.image.licenses="Apache-2.0"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/* \
@@ -17,7 +18,9 @@ COPY --from=build /build/out/hik-sdk-http-bridge /opt/hik-bridge/bin/hik-sdk-htt
 COPY vendor/hcnetsdk/sdk /opt/hik-bridge/sdk
 COPY config/config.json /opt/hik-bridge/config/config.json
 COPY vendor/licenses /opt/hik-bridge/licenses
-RUN chmod 0755 /opt/hik-bridge/bin/hik-sdk-http-bridge \
+RUN cp /usr/share/common-licenses/Apache-2.0 /opt/hik-bridge/licenses/PROJECT-APACHE-2.0.txt \
+    && printf '%s\n' 'hik-hcnet-http-bridge' 'Copyright 2026 davideward5340' > /opt/hik-bridge/NOTICE \
+    && chmod 0755 /opt/hik-bridge/bin/hik-sdk-http-bridge \
     && chown -R hikbridge:hikbridge /opt/hik-bridge
 ENV LD_LIBRARY_PATH=/opt/hik-bridge/sdk:/opt/hik-bridge/sdk/HCNetSDKCom
 USER hikbridge

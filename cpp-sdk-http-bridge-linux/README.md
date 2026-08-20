@@ -1,6 +1,20 @@
-# Linux HCNetSDK HTTP Bridge（C++17）
+# HCNetSDK HTTP Bridge（C++17，Linux/Windows）
 
-该项目使用 HCNetSDK 直接登录 NVR：实时调用 `NET_DVR_RealPlay_V40`，回放调用 `NET_DVR_PlayBackByTime_V40`；随后把 SDK 回调的 PS 流交给 FFmpeg。Bridge 登录后优先读取设备压缩参数以直接判断主/子码流编码；老设备不支持时才探测 fMP4 初始化段。H.264 使用 `-c:v copy` 保持零视频转码，H.265 或未知编码才解码并转为 H.264 的 HTTP chunked fragmented MP4（fMP4）。默认仅输出视频；只有将 `media.enableAudio` 显式设为 `true` 时，1 倍速才附带 AAC。前端必须通过 MSE（`MediaSource` + `SourceBuffer`）追加分片，不应直接将 `/video` 赋给 `<video>.src`。
+该项目使用 HCNetSDK 直接登录 NVR：实时调用 `NET_DVR_RealPlay_V40`，回放调用 `NET_DVR_PlayBackByTime_V40`；随后把 SDK 回调的 PS 流交给 FFmpeg。Bridge 登录后优先读取设备压缩参数以直接判断主/子码流编码；老设备不支持时才探测 fMP4 初始化段。Windows 的 1 倍速 H.264 和 Linux 的 H.264 实时预览优先使用 `-c:v copy`；若直通只能生成 `ftyp/moov` 初始化段、未能在超时内生成首个 `moof/mdat` 媒体分片，Bridge 会重新取流并自动降级为 H.264 软件转码。Linux x86_64/ARM64 的 H.264 回放固定使用 libx264 转码，以重建浏览器兼容的时间戳、关键帧和参数集。H.265、未知编码和变速播放同样转为 H.264 的 HTTP chunked fragmented MP4（fMP4）。默认仅输出视频；只有将 `media.enableAudio` 显式设为 `true` 时，1 倍速才附带 AAC。前端必须通过 MSE（`MediaSource` + `SourceBuffer`）追加分片，不应直接将 `/video` 赋给 `<video>.src`。
+
+同一份 `src/main.cpp` 支持 Linux x86_64、Linux ARM64 和 Windows x86。Linux 保持 `libx264` 软件转码，其中 H.264 实时预览仍可直通、H.264 回放固定转码；Windows 仅在确认输入为 H.265 且需要输出 H.264 时启用显卡编码。Windows 启动时按 NVIDIA NVENC、Intel QSV、AMD AMF 顺序执行真实的 64×64 H.264 编码测试；不可用时使用已经过真实编码测试的 `libx264`。Windows 的 1 倍速 H.264 仍直接复制。
+
+Windows x86 构建：
+
+```powershell
+.\scripts\build-windows.ps1 -Configuration Release `
+  -SdkPackage C:\SDKs\HCNetSDK-Win32 `
+  -Runtime C:\SDKs\hik-bridge-runtime
+```
+
+`SdkPackage` 必须指向使用者从合法渠道取得的 Win32 HCNetSDK 包，`Runtime` 必须包含 `hcnetsdk/` 和 `ffmpeg/`。厂商 SDK 与 FFmpeg 二进制不随源码仓库分发。输出为 `build-win32/hik-sdk-http-bridge.exe`；Windows 配置使用 `config/config.windows.json`。`ffmpeg.hardwareAcceleration` 可设为 `auto`、`off`、`nvidia`、`qsv` 或 `amf`，`ffmpeg.hardwareProbeTimeoutMs` 控制单次真实编码探测超时。
+
+当前参考运行时的 HCNetSDK 和主程序是 x86，但 `ffmpeg.exe` 是 x64，因此默认交付物运行在 64 位 Windows（允许 x86 主程序启动 x64 FFmpeg）。如需运行在真正的 32 位 Windows 操作系统，须通过 CMake 的 `HIK_WIN32_RUNTIME` 指定包含 Win32 FFmpeg 的运行时目录；该 FFmpeg 至少必须包含 `libx264`、`lavfi/color`、`mpegps` 和 `mp4`，需要显卡加速时还应包含目标厂商的编码器。
 
 ## 实时首画面优化配置
 
@@ -106,5 +120,6 @@ AppImage 仅是额外的单文件分发格式；正式产物仍须通过 glibc 2
 
 ## 许可证
 
-- 海康 SDK 许可证位于 `vendor/licenses/`，再分发前必须确认海康授权范围。
+- 本项目自有代码采用仓库根目录的 Apache License 2.0。
+- 海康 SDK 为厂商专有组件，不随本仓库分发；使用和再分发前必须自行确认厂商授权范围。
 - 静态 FFmpeg 的许可证、构建配置和源代码获取方式必须由发布方随包提供，具体见 `runtime/ffmpeg/README.md`。

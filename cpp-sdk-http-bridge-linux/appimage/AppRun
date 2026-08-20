@@ -2,6 +2,11 @@
 # AppImage 入口。可由 AppImage Runtime 调用，也可在解压后的 AppDir 内直接执行。
 set -eu
 
+if command -v locale >/dev/null 2>&1 && locale -a 2>/dev/null | grep -Eiq '^C([.]UTF-?8|[.]utf8)$'; then
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8
+fi
+
 APP_HOME=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)}
 BIN="$APP_HOME/usr/bin/hik-sdk-http-bridge"
 SDK_DIR="$APP_HOME/usr/lib/hik/sdk"
@@ -11,7 +16,7 @@ DEFAULT_CONFIG="$APP_HOME/usr/share/hik/config/config.json"
 MANIFEST="$APP_HOME/usr/share/hik/release-manifest.env"
 
 fail() {
-    printf '%s\n' "错误: $*" >&2
+    printf '%s\n' "错误：$*" >&2
     exit 1
 }
 
@@ -19,11 +24,16 @@ version_at_least() {
     [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]
 }
 
-[ "$(uname -m)" = "x86_64" ] || fail "本 AppImage 仅支持 x86_64；当前架构为 $(uname -m)。"
-[ -x "$BIN" ] || fail "AppImage 内缺少桥接程序"
-[ -x "$FFMPEG" ] || fail "AppImage 内缺少静态 FFmpeg"
-[ -r "$SDK_DIR/libhcnetsdk.so" ] || fail "AppImage 内缺少 HCNetSDK"
-[ -d "$COMPONENT_DIR" ] || fail "AppImage 内缺少 HCNetSDKCom 组件目录"
+package_arch=
+if [ -r "$MANIFEST" ]; then
+    package_arch=$(sed -n 's/^ARCH=//p' "$MANIFEST" | head -n 1 || true)
+fi
+[ -n "$package_arch" ] || package_arch=x86_64
+[ "$(uname -m)" = "$package_arch" ] || fail "本 AppImage 需要 $package_arch，当前架构为 $(uname -m)。"
+[ -x "$BIN" ] || fail "AppImage 内缺少桥接程序。"
+[ -x "$FFMPEG" ] || fail "AppImage 内缺少静态 FFmpeg。"
+[ -r "$SDK_DIR/libhcnetsdk.so" ] || fail "AppImage 内缺少 HCNetSDK。"
+[ -d "$COMPONENT_DIR" ] || fail "AppImage 内缺少 HCNetSDKCom 组件目录。"
 
 required_glibc=2.28
 if [ -r "$MANIFEST" ]; then
@@ -47,7 +57,7 @@ if [ "${1:-}" = "--version" ]; then
     exec "$BIN" --version
 fi
 if [ "${1:-}" = "--config" ]; then
-    [ "$#" -ge 2 ] || fail "--config 后必须给出配置文件路径"
+    [ "$#" -ge 2 ] || fail "--config 后必须提供配置文件路径。"
     exec "$BIN" "$@"
 fi
 

@@ -1,5 +1,7 @@
 # hik-hcnet-http-bridge
 
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 基于海康威视 HCNetSDK 的本地 HTTP 视频桥接项目。Bridge 直接登录 NVR，读取实时预览或按时间回放的码流，经 FFmpeg 规范化为浏览器兼容的 H.264 fragmented MP4（fMP4），由前端通过 MSE（`MediaSource`）写入 `<video>` 播放。
 
 项目面向局域网、客户端与 NVR 点对点部署场景；Bridge 默认只监听 `127.0.0.1`，前端页面通过本机 HTTP 服务访问视频，不需要浏览器插件。
@@ -9,7 +11,7 @@
 | 目录 | 平台与技术栈 | 说明 |
 | --- | --- | --- |
 | `csharp-sdk-http-bridge/` | Windows、C#、.NET Framework 4.8 | Windows 服务/CLI 版本。支持 HCNetSDK 取流、H.264 直通、H.265 转 H.264；可自动探测可用的 FFmpeg 硬件转码后端并安全回退到软件转码。 |
-| `cpp-sdk-http-bridge-linux/` | Linux、C++17 | Linux CLI/便携包版本。功能与 C# 版本保持一致，当前固定使用软件 FFmpeg 转码。支持 portable package 与 AppImage 打包流程。 |
+| `cpp-sdk-http-bridge-linux/` | Linux/Windows、C++17 | HCNetSDK 直连版本。支持 Linux x86_64、Linux ARM64 和 Windows x86，以及 portable package 与 AppImage 打包流程。 |
 
 ## 核心能力
 
@@ -22,11 +24,20 @@
 
 ## 运行前提
 
-两个子项目均依赖以下供应商/第三方组件，二进制文件不纳入本源码仓库：
+两个正式子项目按目标平台依赖以下供应商/第三方组件，厂商二进制文件不纳入本源码仓库：
 
 - 与目标平台和架构匹配的 HCNetSDK 及其运行库。
 - 可执行的 FFmpeg；Windows 版本可按配置启用硬件转码，Linux 版本默认软件转码。
 - 合法可访问的 NVR、SDK 端口、账号及授权。
 
-详细的配置、构建和部署说明请分别参阅两个子项目内的 `README.md`。
+请从厂商官方渠道获取 SDK，并遵守相应授权条款。仓库中的配置只包含安全示例；不要提交真实设备地址、用户名、密码、证书或访问令牌。
 
+详细的配置、构建和部署说明请分别参阅各子项目内的 `README.md`。
+
+## 许可证
+
+本项目自有代码采用 [Apache License 2.0](LICENSE) 许可。第三方组件继续适用各自许可证。HCNetSDK 和其他厂商组件不受本项目许可证覆盖，也不随本仓库分发。
+
+本项目是非官方社区项目，与杭州海康威视数字技术股份有限公司不存在隶属或背书关系。产品名和商标归其各自权利人所有。
+
+贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)；安全问题请按 [SECURITY.md](SECURITY.md) 中的方式报告。

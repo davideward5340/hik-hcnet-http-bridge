@@ -24,7 +24,7 @@
 ## 构建和运行
 
 ```powershell
-cd D:\AI_SPACE\hik\csharp-sdk-http-bridge
+cd csharp-sdk-http-bridge
 .\deploy\build.ps1
 .\src\HikSdkHttpBridge\bin\x86\Release\net48\hik-sdk-http-bridge.exe validate-config
 .\src\HikSdkHttpBridge\bin\x86\Release\net48\hik-sdk-http-bridge.exe run
@@ -49,7 +49,7 @@ cd D:\AI_SPACE\hik\csharp-sdk-http-bridge
 实时播放（`camera` 为 HCNetSDK 真实通道号，不做固定 `+32`）：
 
 ```text
-GET /video?option=realplay&ip=192.168.1.64&port=8000&username=admin&password=...&camera=33&stream=main&speed=1&sid=live-1
+GET /video?option=realplay&ip=192.0.2.10&port=8000&username=admin&password=PASSWORD&camera=33&stream=main&speed=1&sid=live-1
 ```
 
 回放需增加 Unix 秒时间戳 `start`、`end`。`speed` 支持 `16,8,4,2,1,0.5,0.25,0.125,0.0625`；实时播放只允许 `speed=1`。通道号必须使用 NVR 的 SDK 通道号：模拟通道通常为 `1...N`，数字/IP 通道通常从 `33` 开始，具体以登录后的设备能力为准。
@@ -59,7 +59,7 @@ GET /video?option=realplay&ip=192.168.1.64&port=8000&username=admin&password=...
 例如，播放模拟通道 1：
 
 ```text
-GET /video?option=realplay&ip=192.168.1.64&port=8000&username=admin&password=...&camera=1&channelType=analog&stream=main&speed=1&sid=analog-live-1
+GET /video?option=realplay&ip=192.0.2.10&port=8000&username=admin&password=PASSWORD&camera=1&channelType=analog&stream=main&speed=1&sid=analog-live-1
 ```
 
 ## Windows 服务

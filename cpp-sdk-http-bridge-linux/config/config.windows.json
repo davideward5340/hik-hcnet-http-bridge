@@ -6,32 +6,32 @@
     "maxSessions": 8
   },
   "sdk": {
-    "directory": "/opt/hik-bridge/sdk",
+    "directory": "./hcnetsdk",
     "readVideoCodecFromDevice": true,
     "forceKeyFrameOnRealPlay": true,
     "realPlayKeyFrameIntervalFrames": 25,
     "connectProbeTimeoutMs": 1500
   },
   "ffmpeg": {
-    "path": "/usr/bin/ffmpeg",
+    "path": "./ffmpeg/ffmpeg.exe",
     "logLevel": "info",
     "hardwareAcceleration": "auto",
     "hardwareProbeTimeoutMs": 3000
   },
   "logging": {
-    "directory": "../logs",
+    "directory": "./logs",
     "retentionDays": 30
   },
   "media": {
     "queueBytes": 67108864,
     "queueBackpressureMs": 500,
+    "maxPlaybackSeconds": 86400,
     "outputVideoCodec": "h264",
     "videoEncoder": "libx264",
     "videoPreset": "veryfast",
     "enableAudio": false,
     "codecCacheSeconds": 900,
-    "codecCacheFile": "../state/video-codec-cache.tsv",
-    "maxPlaybackSeconds": 86400
+    "codecCacheFile": "./state/video-codec-cache.tsv"
   },
   "timeouts": {
     "sdkStartMs": 10000,
