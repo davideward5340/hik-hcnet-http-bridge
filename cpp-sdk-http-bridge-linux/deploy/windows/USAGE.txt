@@ -1,0 +1,27 @@
+Hik SDK HTTP Bridge — Windows 使用说明
+
+环境要求：64 位 Windows。桥接程序和海康 SDK 为 x86，随包 FFmpeg 为 x64。
+
+1. 将 hikbridge 文件夹完整解压到固定本地目录，不要直接在压缩包中运行。
+2. 配置文件为 config.json。默认监听 http://127.0.0.1:28080，最大并发播放会话数为 16。
+3. 右键“安装.bat”，选择“以管理员身份运行”；安装后可在 services.msc 中管理 hikbridge。
+4. 服务普通自动启动。升级后需重启服务，才能使用新程序和配置。
+5. 健康检查：http://127.0.0.1:28080/healthz，返回 activeSessions、maxSessions、availableSessions。
+6. 手动前台运行可双击 run-bridge.cmd，请先停止已安装服务以避免端口冲突。
+7. 卸载时以管理员身份运行“卸载.bat”。配置、日志及注册备份保留。
+
+安装和卸载仅使用 CMD 及 Windows 原生命令，不需要 PowerShell、WMIC 或 curl。
+安装.bat /check 只校验文件和配置，不修改服务或计划任务。
+安装.bat、卸载.bat、windows-service.cmd 必须放在同一目录，脚本为 GBK/CRLF 编码。
+ffmpeg 目录包含 ffmpeglibs 提供的全部 46 个 DLL，不要单独移动 ffmpeg.exe。
+
+不要移动或删除已经安装的服务目录。日志写入 logs，编码缓存写入 state。
+并发满额时，先停止其他播放，待名额释放后重试；长期不释放可重启服务并检查日志。
+本包不包含开发机的日志、设备缓存或安装备份。
+
+当前版本：@VERSION@；版本查询：http://127.0.0.1:28080/version。
+无需配置 controlAllowedOrigin，清理接口允许所有网站调用。
+
+升级：将新包解压到独立目录，以管理员身份运行“升级.bat”。工具自动识别 C++/C# 服务和原安装路径，备份后全量替换，验证失败时尝试恢复。详见升级说明.txt。
+
+HTTP 连接上限：server.maxHttpConnections，默认 64；独立于 maxSessions。繁忙时稍后重试。

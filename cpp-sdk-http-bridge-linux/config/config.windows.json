@@ -3,7 +3,8 @@
   "server": {
     "bind": "127.0.0.1",
     "port": 28080,
-    "maxSessions": 8
+    "maxSessions": 16,
+    "maxHttpConnections": 64
   },
   "sdk": {
     "directory": "./hcnetsdk",
@@ -37,6 +38,8 @@
     "sdkStartMs": 10000,
     "firstMediaMs": 15000,
     "noSdkDataMs": 10000,
+    "outputStallMs": 60000,
+    "clientWriteStallMs": 60000,
     "playbackKeepAliveMs": 1500
   }
 }

@@ -1,0 +1,9 @@
+Hik SDK HTTP Bridge @VERSION@ — Linux 全量包
+
+包含 x86_64、aarch64 两种 AppImage，内含 SDK 和静态 FFmpeg。
+解压后使用 sudo sh install.sh 安装，sudo sh uninstall.sh 卸载。
+sh start.sh 为前台运行，sh start.sh --version 查询版本。
+默认监听 127.0.0.1:28080，maxSessions=16，maxHttpConnections=64。
+安装脚本不执行文件哈希校验，不要求 sha256sum 或 .sha256 文件。
+基本文件存在性、系统及架构检查继续保留。外部校验文件仅供人工核验。
+无需安装系统 FFmpeg 或 FUSE，不支持 musl。

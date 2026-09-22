@@ -1,5 +1,5 @@
 param(
-    [string]$ServiceName = 'HikSdkHttpBridge'
+    [string]$ServiceName = 'hikbridge'
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot

@@ -3,6 +3,8 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+RELEASE_VERSION=$(sed -n 's/^#define HIK_BRIDGE_VERSION "\(.*\)"/\1/p' "$ROOT/src/version.h")
+export VERSION=${VERSION:-$RELEASE_VERSION}
 ARM_SDK_ROOT=${ARM_SDK_ROOT:-"$ROOT/../docs/HCNetSDKV6.1.11.30_build20260805_ArmLinux64_20260807100545"}
 BUILD_DIR=${BUILD_DIR:-"$ROOT/build-arm64-glibc223"}
 SDK_STAGE=${SDK_STAGE:-"$BUILD_DIR/sdk"}
@@ -32,6 +34,6 @@ export SDK_VERSION=HCNetSDK_V6.1.11.30_ArmLinux64_no-openal-playctrl-voice
 export COMPAT_GLIBC_MAX=2.23
 export APPIMAGETOOL=${APPIMAGETOOL:-"$ROOT/tools/appimagetool-x86_64.AppImage"}
 export RUNTIME_FILE=${RUNTIME_FILE:-"$ROOT/tools/runtime-aarch64"}
-export OUTPUT=${OUTPUT:-"$ROOT/dist/hik-sdk-http-bridge-${VERSION:-1.0.0}-aarch64-glibc2.23.AppImage"}
+export OUTPUT=${OUTPUT:-"$ROOT/dist/hik-sdk-http-bridge-$VERSION-aarch64-glibc2.23.AppImage"}
 
 exec "$ROOT/scripts/package-appimage.sh"

@@ -1,0 +1,11 @@
+版本：@VERSION@
+打包日期：@BUILD_DATE@
+
+当前发布功能：实时预览、录像回放、会话状态、全部会话清理。
+默认最大播放会话数 16，HTTP 工作连接上限 64。
+Windows：端口独占，服务普通自动启动，升级工具全程互斥并支持旧 C# 服务迁移。
+Linux：监听、连接及管道防继承，使用 posix_spawn 启动 FFmpeg。
+Linux install.sh 不执行 SHA-256 校验；随包校验文件供人工核验。
+
+部署脚本按 Windows/Linux 纳入源码 deploy 目录，发布包入口仍放在 hikbridge 根目录。
+具体发布规则以源码 deploy/RELEASE.md 为准。

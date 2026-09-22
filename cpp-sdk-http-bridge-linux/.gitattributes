@@ -1,0 +1,4 @@
+# Chinese CMD scripts: UTF-8 in Git, GBK/CRLF in working tree.
+deploy/windows/*.bat text working-tree-encoding=GBK eol=crlf
+deploy/windows/*.cmd text working-tree-encoding=GBK eol=crlf
+deploy/**/*.sh text eol=lf

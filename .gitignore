@@ -28,3 +28,9 @@ secrets/
 /csharp_cpp_feature_diff.md
 /feature_change_log.md
 /videoplaybackhttpbridge.md
+
+# 本地验证记录和全量发布包，不属于源码提交
+/temp/
+/hikbridge*.zip
+/hikbridge*.tar.gz
+/hikbridge*.sha256

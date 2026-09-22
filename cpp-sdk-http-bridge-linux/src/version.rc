@@ -1,0 +1,29 @@
+#include <winver.h>
+#include "version.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION HIK_BRIDGE_FILE_VERSION
+ PRODUCTVERSION HIK_BRIDGE_FILE_VERSION
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "Hik SDK HTTP Bridge\0"
+            VALUE "FileVersion", HIK_BRIDGE_VERSION "\0"
+            VALUE "ProductName", "Hik SDK HTTP Bridge\0"
+            VALUE "ProductVersion", HIK_BRIDGE_VERSION "\0"
+            VALUE "OriginalFilename", "hik-sdk-http-bridge.exe\0"
+            VALUE "Comments", "Build date: " HIK_BRIDGE_BUILD_DATE "\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

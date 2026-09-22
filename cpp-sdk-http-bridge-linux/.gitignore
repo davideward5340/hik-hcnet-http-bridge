@@ -15,6 +15,11 @@ build-arm64-glibc223/
 build-x86_64-glibc223/
 build-x86_64-ffmpeg/
 build-win32/
+build-win32-*/
+build-service-linux/
+build-win32-session16/
+build-session16-tests/
+build-test/
 dist/
 runtime/
 tools/
@@ -31,3 +36,8 @@ state/
 
 # 第三方 HCNetSDK 二进制及头文件需按供应商授权单独获取，不随源码仓库提交
 vendor/
+ffmpeglibs/
+
+# Python 测试缓存
+__pycache__/
+*.pyc

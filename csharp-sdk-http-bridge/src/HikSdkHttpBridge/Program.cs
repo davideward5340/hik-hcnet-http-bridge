@@ -73,7 +73,7 @@ namespace HikSdkHttpBridge
         public BridgeWindowsService(AppConfig config)
         {
             _config = config;
-            ServiceName = "HikSdkHttpBridge";
+            ServiceName = "hikbridge";
             CanStop = true;
             AutoLog = true;
         }

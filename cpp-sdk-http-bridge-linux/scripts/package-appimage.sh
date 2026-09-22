@@ -3,8 +3,10 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+RELEASE_VERSION=$(sed -n 's/^#define HIK_BRIDGE_VERSION "\(.*\)"/\1/p' "$ROOT/src/version.h")
+export VERSION=${VERSION:-$RELEASE_VERSION}
 REPO_ROOT=$(CDPATH= cd -- "$ROOT/.." && pwd)
-VERSION=${VERSION:-1.0.0}
+VERSION=$VERSION
 ARCH=${ARCH:-x86_64}
 if [ "$ARCH" = "aarch64" ]; then
     DEFAULT_BUILD_DIR="$ROOT/build-arm64"
